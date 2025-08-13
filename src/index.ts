@@ -33,6 +33,7 @@ app.post('/api/webhooks/stripe', express.raw({ type: 'application/json' }), (req
     case 'payment_intent.succeeded':
     case 'invoice.payment_succeeded':
       console.log('✅ Stripe event:', event.type);
+      markPremiumNow();
       break;
     default:
       console.log('ℹ️ Unhandled Stripe event:', event.type);
@@ -42,6 +43,12 @@ app.post('/api/webhooks/stripe', express.raw({ type: 'application/json' }), (req
 
 // Les autres routes peuvent être en JSON APRES le webhook Stripe
 app.use(express.json());
+
+// Cache mémoire pour l'état premium (démo)
+let lastPremium = 0;
+function markPremiumNow() {
+  lastPremium = Date.now();
+}
 
 app.post('/create-checkout-session', async (_req, res) => {
   try {
@@ -60,6 +67,12 @@ app.post('/create-checkout-session', async (_req, res) => {
     console.error('❌ create-checkout-session error:', e.message);
     res.status(400).json({ error: e.message });
   }
+});
+
+// GET /subscription/status - Vérifier l'état premium
+app.get('/subscription/status', (_req, res) => {
+  const active = (Date.now() - lastPremium) < 1000 * 60 * 30; // "actif" 30 minutes après un paiement test
+  res.json({ active });
 });
 
 // (option debug) lister les routes connues pour vérifier le montage
