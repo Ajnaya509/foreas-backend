@@ -1,73 +1,78 @@
+import 'dotenv/config';
 import express from 'express';
 import cors from 'cors';
-import dotenv from 'dotenv';
 import Stripe from 'stripe';
-import bodyParser from 'body-parser';
 
-dotenv.config();
 const app = express();
 app.use(cors());
 
-// Raw body for webhooks (must be before json parser)
-app.use('/api/webhooks/stripe', bodyParser.raw({type: 'application/json'}));
+// ⚠️ Webhook Stripe: utiliser express.raw, et surtout AVANT express.json()
+const stripe = new Stripe(process.env.STRIPE_SECRET_KEY as string, {
+  apiVersion: '2024-06-20',
+});
 
-// JSON parser for other routes
-app.use(bodyParser.json());
+// Health-check simple
+app.get('/health', (_req, res) => res.status(200).send('OK'));
 
-const stripe = new Stripe(process.env['STRIPE_SECRET_KEY'] as string, { apiVersion: '2023-10-16' });
+// Webhook (route EXACTE)
+app.post('/api/webhooks/stripe', express.raw({ type: 'application/json' }), (req, res) => {
+  const sig = req.headers['stripe-signature'] as string | undefined;
+  const whSecret = process.env.STRIPE_WEBHOOK_SECRET;
+  if (!sig || !whSecret) return res.status(400).send('Missing signature or secret');
 
-app.post('/create-checkout-session', async (req, res) => {
+  let event: Stripe.Event;
   try {
-    const { email } = req.body;
+    event = stripe.webhooks.constructEvent(req.body, sig, whSecret);
+  } catch (err: any) {
+    console.error('❌ Stripe signature failed:', err.message);
+    return res.status(400).send(`Webhook Error: ${err.message}`);
+  }
+
+  switch (event.type) {
+    case 'checkout.session.completed':
+    case 'payment_intent.succeeded':
+    case 'invoice.payment_succeeded':
+      console.log('✅ Stripe event:', event.type);
+      break;
+    default:
+      console.log('ℹ️ Unhandled Stripe event:', event.type);
+  }
+  res.json({ received: true });
+});
+
+// Les autres routes peuvent être en JSON APRES le webhook Stripe
+app.use(express.json());
+
+app.post('/create-checkout-session', async (_req, res) => {
+  try {
+    const priceId = process.env.STRIPE_PRICE_ID;
+    if (!priceId) return res.status(400).json({ error: 'Missing STRIPE_PRICE_ID' });
+
     const session = await stripe.checkout.sessions.create({
       mode: 'subscription',
-      customer_email: email,
-      line_items: [{ price: process.env['PRICE_ID'] as string, quantity: 1 }],
-      success_url: process.env['SUCCESS_URL'] as string,
-      cancel_url: process.env['CANCEL_URL'] as string,
-      allow_promotion_codes: true,
-      subscription_data: {
-        trial_period_days: 3
-      }
+      line_items: [{ price: priceId, quantity: 1 }],
+      success_url: 'https://example.com/success',
+      cancel_url: 'https://example.com/cancel'
     });
+
     res.json({ url: session.url });
-  } catch (e:any) {
+  } catch (e: any) {
+    console.error('❌ create-checkout-session error:', e.message);
     res.status(400).json({ error: e.message });
   }
 });
 
-// Webhook endpoint for Stripe events
-app.post('/api/webhooks/stripe', (req, res) => {
-  const sig = req.headers['stripe-signature'] as string;
-  const endpointSecret = process.env['STRIPE_WEBHOOK_SECRET'] as string;
-  
-  let event;
-  try {
-    event = stripe.webhooks.constructEvent(req.body, sig, endpointSecret);
-  } catch (err:any) {
-    console.log('Webhook signature verification failed.', err.message);
-    return res.status(400).send(`Webhook Error: ${err.message}`);
-  }
-
-  // Handle the event
-  switch (event.type) {
-    case 'checkout.session.completed':
-      console.log('Payment successful!', event.data.object);
-      break;
-    case 'invoice.payment_succeeded':
-      console.log('Invoice paid!', event.data.object);
-      break;
-    case 'payment_intent.succeeded':
-      console.log('Payment intent succeeded!', event.data.object);
-      break;
-    default:
-      console.log(`Unhandled event type ${event.type}`);
-  }
-
-  res.json({received: true});
+// (option debug) lister les routes connues pour vérifier le montage
+app.get('/__routes', (_req, res) => {
+  // @ts-ignore
+  const stack = (app as any)._router?.stack || [];
+  const routes = stack
+    .filter((l: any) => l.route)
+    .map((l: any) => ({ methods: l.route.methods, path: l.route.path }));
+  res.json(routes);
 });
 
-app.get('/health',(_,res)=>res.json({ok:true}));
-
-const port = process.env['PORT'] || 4242;
-app.listen(port, ()=>console.log('Stripe backend on', port));
+const PORT = process.env.PORT || 8080;
+app.listen(PORT, () => {
+  console.log(`🚀 FOREAS backend listening on ${PORT}`);
+});
