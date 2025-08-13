@@ -1,0 +1,622 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ========== AUTHENTIFICATION ==========
+model User {
+  id            String    @id @default(cuid())
+  email         String    @unique
+  phone         String?   @unique
+  password      String?
+  name          String?
+  avatar        String?
+  role          Role      @default(DRIVER)
+  status        UserStatus @default(PENDING)
+  
+  // Relations
+  driver        Driver?
+  sessions      Session[]
+  bookings      Booking[] @relation("ClientBookings")
+  
+  // Timestamps
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+  lastLoginAt   DateTime?
+  
+  @@index([email])
+  @@index([phone])
+}
+
+model Session {
+  id           String   @id @default(cuid())
+  userId       String
+  token        String   @unique
+  expiresAt    DateTime
+  userAgent    String?
+  ipAddress    String?
+  
+  user         User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  
+  createdAt    DateTime @default(now())
+  
+  @@index([token])
+  @@index([userId])
+}
+
+// ========== CHAUFFEUR ==========
+model Driver {
+  id                String    @id @default(cuid())
+  userId            String    @unique
+  licenseNumber     String    @unique
+  vehicleId         String?
+  
+  // Informations business
+  companyName       String?
+  siret             String?
+  vatNumber         String?
+  
+  // Plateformes VTC - VALIDATION: Format spécifique par plateforme
+  uberDriverId      String?   // Format: UUID Uber (ex: 12345678-1234-1234-1234-123456789012)
+  boltDriverId      String?   // Format: Numérique Bolt (ex: 123456)  
+  heetchDriverId    String?   // Format: Alpha-numérique Heetch (ex: HTC123ABC)
+  
+  // Stripe Connect
+  stripeAccountId   String?   @unique
+  stripeOnboarded   Boolean   @default(false)
+  
+  // Site personnel
+  personalWebsite   String?   @unique
+  websiteSlug       String?   @unique
+  
+  // Relations
+  user              User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  vehicle           Vehicle?  @relation(fields: [vehicleId], references: [id])
+  trips             Trip[]
+  bookings          Booking[] @relation("DriverBookings")
+  earnings          Earning[]
+  availability      Availability[]
+  reviews           Review[]
+  insights          AjnayaInsight[]
+  feedbacks         AjnayaFeedback[]
+  platformCredentials DriverPlatformCredentials[]
+  aggregatedBookings AggregatedBooking[]
+  platformStats     PlatformStats[]
+  stripeAccount     StripeAccount?
+  
+  // Stats - ATTENTION: Ces valeurs sont dénormalisées pour la performance
+  // Elles doivent être mises à jour via des triggers ou jobs CRON
+  totalRides        Int       @default(0)    // Cache: nombre total de courses
+  totalEarnings     Float     @default(0)    // Cache: revenus totaux en EUR
+  averageRating     Float     @default(0)    // Cache: note moyenne sur 5
+  
+  // Timestamps
+  createdAt         DateTime  @default(now())
+  updatedAt         DateTime  @updatedAt
+  
+  @@index([userId])
+  @@index([websiteSlug])
+  @@index([stripeAccountId])
+}
+
+// ========== STRIPE ACCOUNT ==========
+model StripeAccount {
+  id              String    @id @default(cuid())
+  userId          String    @unique
+  accountId       String    @unique
+  
+  // Onboarding status
+  chargesEnabled  Boolean   @default(false)
+  payoutsEnabled  Boolean   @default(false)
+  detailsSubmitted Boolean  @default(false)
+  
+  // Business details
+  businessType    String?
+  country         String?
+  defaultCurrency String?
+  
+  // Relations
+  driver          Driver    @relation(fields: [userId], references: [userId])
+  
+  // Timestamps
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+  
+  @@index([accountId])
+}
+
+// ========== VÉHICULE ==========
+model Vehicle {
+  id            String    @id @default(cuid())
+  brand         String
+  model         String
+  year          Int
+  color         String
+  licensePlate  String    @unique
+  seats         Int
+  category      VehicleCategory
+  
+  // Relations
+  drivers       Driver[]
+  
+  // Timestamps
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+  
+  @@index([licensePlate])
+}
+
+// ========== COURSES (renamed from Ride to Trip for clarity) ==========
+model Trip {
+  id              String    @id @default(cuid())
+  driverId        String
+  platform        Platform
+  platformTripId  String?   // ID unique de la course sur la plateforme externe
+  
+  // Détails trajet
+  pickupAddress   String
+  pickupLat       Float
+  pickupLng       Float
+  dropoffAddress  String
+  dropoffLat      Float
+  dropoffLng      Float
+  distance        Float     // en km
+  duration        Int       // en minutes
+  
+  // Prix
+  basePrice       Float
+  surge           Float     @default(1)
+  finalPrice      Float
+  commission      Float     // Commission plateforme
+  netEarnings     Float     // Revenus nets chauffeur
+  
+  // Status
+  status          TripStatus
+  
+  // Relations - onDelete: Restrict pour protéger les données V1
+  driver          Driver    @relation(fields: [driverId], references: [id], onDelete: Restrict)
+  earnings        Earning[] // Relation inverse pour les gains de cette course
+  
+  // Timestamps
+  requestedAt     DateTime
+  acceptedAt      DateTime?
+  startedAt       DateTime?
+  completedAt     DateTime?
+  cancelledAt     DateTime?
+  
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+  
+  @@index([driverId])
+  @@index([platform])
+  @@index([status])
+  @@index([driverId, platform, startedAt]) // Index composé pour queries de performance
+  @@unique([platform, platformTripId])  // Contrainte: ID unique par plateforme
+}
+
+// ========== RÉSERVATIONS DIRECTES ==========
+model Booking {
+  id              String    @id @default(cuid())
+  driverId        String
+  clientId        String
+  
+  // Détails réservation
+  pickupAddress   String
+  pickupLat       Float?
+  pickupLng       Float?
+  dropoffAddress  String?
+  dropoffLat      Float?
+  dropoffLng      Float?
+  
+  // Timing
+  scheduledFor    DateTime
+  estimatedDuration Int?    // en minutes
+  
+  // Prix
+  proposedPrice   Float?
+  finalPrice      Float?
+  paymentMethod   PaymentMethod
+  paymentStatus   PaymentStatus @default(PENDING)
+  stripePaymentId String?
+  
+  // Status
+  status          BookingStatus
+  
+  // Notes
+  clientNotes     String?
+  driverNotes     String?
+  
+  // Relations
+  driver          Driver    @relation("DriverBookings", fields: [driverId], references: [id], onDelete: Restrict)
+  client          User      @relation("ClientBookings", fields: [clientId], references: [id], onDelete: Restrict)
+  earnings        Earning[] // Relation inverse pour les gains de cette réservation
+  
+  // Timestamps
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+  confirmedAt     DateTime?
+  completedAt     DateTime?
+  cancelledAt     DateTime?
+  
+  @@index([driverId])
+  @@index([clientId])
+  @@index([status])
+  @@index([scheduledFor])
+}
+
+// ========== REVENUS ==========
+model Earning {
+  id            String    @id @default(cuid())
+  driverId      String
+  
+  type          EarningType
+  platform      Platform?
+  amount        Float
+  currency      String    @default("EUR")
+  
+  // Références avec Foreign Keys - SÉCURISÉ
+  tripId        String?    // ID de la course associée (si applicable)
+  bookingId     String?    // ID de la réservation associée (si applicable)
+  
+  // Relations
+  driver        Driver    @relation(fields: [driverId], references: [id], onDelete: Cascade)
+  trip          Trip?     @relation(fields: [tripId], references: [id], onDelete: SetNull)
+  booking       Booking?  @relation(fields: [bookingId], references: [id], onDelete: SetNull)
+  
+  // Timestamps
+  earnedAt      DateTime
+  createdAt     DateTime  @default(now())
+  
+  @@index([driverId])
+  @@index([earnedAt])
+  @@index([tripId])
+  @@index([bookingId])
+}
+
+// ========== DISPONIBILITÉS ==========
+model Availability {
+  id            String    @id @default(cuid())
+  driverId      String
+  
+  dayOfWeek     Int       // 0-6 (Dimanche-Samedi)
+  startTime     DateTime  // Heure de début (seule l'heure/minute compte)
+  endTime       DateTime  // Heure de fin (seule l'heure/minute compte)
+  isActive      Boolean   @default(true)
+  
+  // Relations
+  driver        Driver    @relation(fields: [driverId], references: [id], onDelete: Cascade)
+  
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+  
+  @@unique([driverId, dayOfWeek, startTime])  // Pas de créneaux en double
+  @@index([driverId])
+}
+
+// ========== AVIS ==========
+model Review {
+  id            String    @id @default(cuid())
+  driverId      String
+  clientName    String
+  rating        Int       // 1-5
+  comment       String?
+  platform      Platform?
+  
+  // Relations
+  driver        Driver    @relation(fields: [driverId], references: [id], onDelete: Cascade)
+  
+  createdAt     DateTime  @default(now())
+  
+  @@index([driverId])
+  @@index([rating])
+}
+
+// ========== AJNAYA INSIGHTS ==========
+model AjnayaInsight {
+  id            String    @id @default(cuid())
+  driverId      String
+  
+  type          InsightType
+  priority      Priority
+  title         String
+  message       String
+  data          Json?
+  
+  // Status
+  isRead        Boolean   @default(false)
+  isDismissed   Boolean   @default(false)
+  feedbackReceived Boolean @default(false)
+  
+  // Relations
+  driver        Driver    @relation(fields: [driverId], references: [id], onDelete: Cascade)
+  feedbacks     AjnayaFeedback[]
+  
+  // Timestamps
+  expiresAt     DateTime
+  createdAt     DateTime  @default(now())
+  
+  @@index([driverId])
+  @@index([type])
+  @@index([priority])
+  @@index([expiresAt])
+}
+
+model AjnayaFeedback {
+  id               String    @id @default(cuid())
+  driverId         String
+  recommendationId String
+  
+  // Feedback data
+  userAction       UserAction
+  actualOutcome    Int       // Résultat réel en centimes
+  satisfactionScore Int      // 1-5
+  accuracyScore    Float     // 0-100, calculé automatiquement
+  comments         String?
+  contextData      String?   // JSON des conditions contextuelles
+  metadata         String?   // JSON des métadonnées ML
+  
+  // Relations
+  driver           Driver    @relation(fields: [driverId], references: [id], onDelete: Cascade)
+  recommendation   AjnayaInsight @relation(fields: [recommendationId], references: [id], onDelete: Cascade)
+  
+  // Timestamps
+  submittedAt      DateTime  @default(now())
+  
+  @@index([driverId])
+  @@index([recommendationId])
+  @@index([submittedAt])
+  @@index([userAction])
+}
+
+// ========== MULTI-PLATFORM INTEGRATION ==========
+model DriverPlatformCredentials {
+  id            String    @id @default(cuid())
+  driverId      String
+  platform      Platform
+  
+  // Encrypted credentials data
+  encryptedData String    // JSON with encrypted OAuth tokens, API keys, etc.
+  isActive      Boolean   @default(true)
+  lastSyncAt    DateTime?
+  
+  // Relations
+  driver        Driver    @relation(fields: [driverId], references: [id], onDelete: Cascade)
+  
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+  
+  @@unique([driverId, platform])
+  @@index([driverId])
+  @@index([platform])
+}
+
+model AggregatedBooking {
+  id                String    @id @default(cuid())
+  driverId          String
+  platform          Platform
+  platformBookingId String    // ID from the external platform
+  
+  // Booking details
+  pickupAddress     String
+  pickupLat         Float
+  pickupLng         Float
+  dropoffAddress    String?
+  dropoffLat        Float?
+  dropoffLng        Float?
+  
+  // Timing
+  scheduledFor      DateTime
+  estimatedDuration Int?      // in minutes
+  distance          Float?    // in km
+  
+  // Pricing
+  estimatedFare     Float
+  platformFee       Float?
+  currency          String    @default("EUR")
+  
+  // Client info (anonymized for privacy)
+  clientFirstName   String?
+  clientRating      Float?
+  
+  // FOREAS scoring
+  foreasScore       Int       @default(0)  // 0-100
+  profitabilityScore Float   @default(0)  // 0-100
+  recommendation    RecommendationType @default(NEUTRAL)
+  
+  // Status
+  status            AggregatedBookingStatus @default(AVAILABLE)
+  
+  // Relations
+  driver            Driver    @relation(fields: [driverId], references: [id], onDelete: Cascade)
+  
+  // Timestamps
+  expiresAt         DateTime
+  respondedAt       DateTime?
+  createdAt         DateTime  @default(now())
+  updatedAt         DateTime  @updatedAt
+  
+  @@unique([platform, platformBookingId])
+  @@index([driverId])
+  @@index([platform])
+  @@index([status])
+  @@index([foreasScore])
+}
+
+model PlatformStats {
+  id              String    @id @default(cuid())
+  driverId        String
+  platform        Platform
+  
+  // Daily stats
+  date            DateTime  @db.Date
+  
+  // Trip stats
+  totalTrips      Int       @default(0)
+  acceptedTrips   Int       @default(0)
+  completedTrips  Int       @default(0)
+  cancelledTrips  Int       @default(0)
+  
+  // Earnings stats
+  grossEarnings   Float     @default(0)
+  commission      Float     @default(0)
+  netEarnings     Float     @default(0)
+  tips            Float     @default(0)
+  
+  // Performance metrics
+  acceptanceRate  Float     @default(0)  // 0-100
+  completionRate  Float     @default(0)  // 0-100
+  averageRating   Float     @default(0)  // 0-5
+  onlineHours     Float     @default(0)  // hours online
+  
+  // Relations
+  driver          Driver    @relation(fields: [driverId], references: [id], onDelete: Cascade)
+  
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+  
+  @@unique([driverId, platform, date])
+  @@index([driverId])
+  @@index([platform])
+  @@index([date])
+}
+
+// ========== WEBHOOK EVENTS ==========
+model WebhookEvent {
+  id          String    @id @default(cuid())
+  eventId     String    @unique
+  eventType   String
+  processed   Boolean   @default(false)
+  processedAt DateTime?
+  error       String?
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+  
+  @@index([eventId])
+  @@index([eventType])
+  @@index([processed])
+}
+
+// ========== ZONE SNAPSHOTS ==========
+model ZoneSnapshot {
+  id          String    @id @default(cuid())
+  city        String    @unique
+  demandScore Int       // 0-100
+  heatmapData Json      // GeoJSON avec rectangles ou points
+  topZones    Json      // Array des top zones avec scores
+  validUntil  DateTime
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+  
+  @@index([city])
+  @@index([validUntil])
+}
+
+// ========== ENUMS ==========
+enum Role {
+  ADMIN
+  DRIVER
+  CLIENT
+}
+
+enum UserStatus {
+  PENDING
+  ACTIVE
+  SUSPENDED
+  BANNED
+}
+
+enum Platform {
+  UBER
+  BOLT
+  HEETCH
+  MARCEL
+  FOREAS_DIRECT
+  OTHER
+}
+
+enum VehicleCategory {
+  ECONOMY
+  COMFORT
+  PREMIUM
+  VAN
+  LUXURY
+}
+
+enum TripStatus {
+  REQUESTED
+  ACCEPTED
+  IN_PROGRESS
+  COMPLETED
+  CANCELLED
+}
+
+enum BookingStatus {
+  PENDING
+  CONFIRMED
+  IN_PROGRESS
+  COMPLETED
+  CANCELLED
+}
+
+enum PaymentMethod {
+  CASH
+  CARD
+  STRIPE
+  PAYPAL
+}
+
+enum PaymentStatus {
+  PENDING
+  PROCESSING
+  COMPLETED
+  FAILED
+  REFUNDED
+}
+
+enum EarningType {
+  RIDE
+  TIP
+  BONUS
+  BOOKING
+  OTHER
+}
+
+enum InsightType {
+  ZONE_ALERT
+  APP_SWITCH
+  BREAK_REMINDER
+  EARNINGS_BOOST
+  PERFORMANCE
+}
+
+enum Priority {
+  LOW
+  MEDIUM
+  HIGH
+  CRITICAL
+}
+
+enum RecommendationType {
+  ACCEPT
+  REJECT
+  NEUTRAL
+  WAIT_FOR_BETTER
+}
+
+enum AggregatedBookingStatus {
+  AVAILABLE
+  ACCEPTED
+  REJECTED
+  EXPIRED
+  WITHDRAWN
+}
+
+enum UserAction {
+  followed
+  ignored
+  partially_followed
+}

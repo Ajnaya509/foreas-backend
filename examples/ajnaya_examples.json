@@ -1,0 +1,429 @@
+{
+  "ajnaya_insights_examples": {
+    "description": "Exemples de retours JSON du système d'insights Ajnaya",
+    "examples": [
+      {
+        "scenario": "Chauffeur avec forte demande dans sa ville",
+        "input": {
+          "driverId": "driver_123",
+          "city": "Paris",
+          "tripsLast7d": [],
+          "zoneSnapshot": {
+            "city": "Paris",
+            "demandScore": 85,
+            "topZones": [
+              { "name": "Centre-ville", "demandScore": 90, "estimatedWaitTime": 5 },
+              { "name": "Gare du Nord", "demandScore": 85, "estimatedWaitTime": 8 },
+              { "name": "Châtelet", "demandScore": 82, "estimatedWaitTime": 6 }
+            ]
+          }
+        },
+        "output": {
+          "insights": [
+            {
+              "id": "zone_driver_123_1699123456789",
+              "type": "ZONE",
+              "priority": "HIGH",
+              "title": "Forte demande à Paris",
+              "message": "La demande est élevée (85%) ! Ces zones sont particulièrement actives : Centre-ville, Gare du Nord, Châtelet.",
+              "data": {
+                "cityDemandScore": 85,
+                "recommendedZones": [
+                  { "name": "Centre-ville", "demandScore": 90, "estimatedWaitTime": 5 },
+                  { "name": "Gare du Nord", "demandScore": 85, "estimatedWaitTime": 8 },
+                  { "name": "Châtelet", "demandScore": 82, "estimatedWaitTime": 6 }
+                ]
+              },
+              "expiresAt": "2024-01-16T14:30:00.000Z"
+            }
+          ]
+        }
+      },
+      {
+        "scenario": "Chauffeur ayant travaillé trop d'heures",
+        "input": {
+          "driverId": "driver_456",
+          "city": "Lyon",
+          "tripsLast7d": [
+            {
+              "id": "trip_1",
+              "startedAt": "2024-01-15T12:00:00.000Z",
+              "duration": 180,
+              "netEarnings": 30.0
+            },
+            {
+              "id": "trip_2",
+              "startedAt": "2024-01-15T08:00:00.000Z",
+              "duration": 240,
+              "netEarnings": 40.0
+            },
+            {
+              "id": "trip_3",
+              "startedAt": "2024-01-14T22:00:00.000Z",
+              "duration": 300,
+              "netEarnings": 50.0
+            }
+          ]
+        },
+        "output": {
+          "insights": [
+            {
+              "id": "pause_driver_456_1699123456789",
+              "type": "PAUSE",
+              "priority": "CRITICAL",
+              "title": "Temps de pause recommandé",
+              "message": "Vous avez travaillé 12.0h ces dernières 24h. Une pause vous permettra de rester performant et en sécurité.",
+              "data": {
+                "totalDutyHours": 12.0,
+                "maxRecommended": 6,
+                "totalTrips": 3
+              },
+              "expiresAt": "2024-01-16T14:30:00.000Z"
+            }
+          ]
+        }
+      },
+      {
+        "scenario": "Chauffeur avec faibles revenus horaires",
+        "input": {
+          "driverId": "driver_789",
+          "city": "Marseille",
+          "tripsLast7d": [
+            {
+              "id": "trip_1",
+              "startedAt": "2024-01-15T10:00:00.000Z",
+              "duration": 60,
+              "netEarnings": 12.0
+            },
+            {
+              "id": "trip_2",
+              "startedAt": "2024-01-15T12:00:00.000Z",
+              "duration": 90,
+              "netEarnings": 15.0
+            },
+            {
+              "id": "trip_3",
+              "startedAt": "2024-01-15T14:00:00.000Z",
+              "duration": 120,
+              "netEarnings": 20.0
+            }
+          ],
+          "zoneSnapshot": {
+            "city": "Marseille",
+            "demandScore": 60,
+            "topZones": [
+              { "name": "Vieux-Port", "demandScore": 75, "estimatedWaitTime": 8 },
+              { "name": "Gare Saint-Charles", "demandScore": 70, "estimatedWaitTime": 12 }
+            ]
+          }
+        },
+        "output": {
+          "insights": [
+            {
+              "id": "pricing_driver_789_1699123456789",
+              "type": "PRICING",
+              "priority": "MEDIUM",
+              "title": "Revenus en dessous du seuil",
+              "message": "Vos revenus sont de 14€/h, en dessous du seuil de 18€/h. Considérez ces zones plus actives : Vieux-Port, Gare Saint-Charles.",
+              "data": {
+                "currentNetPerHour": 14.22,
+                "targetNetPerHour": 18,
+                "totalTrips": 3,
+                "suggestedZones": [
+                  { "name": "Vieux-Port", "demandScore": 75, "estimatedWaitTime": 8 },
+                  { "name": "Gare Saint-Charles", "demandScore": 70, "estimatedWaitTime": 12 }
+                ]
+              },
+              "expiresAt": "2024-01-16T14:30:00.000Z"
+            }
+          ]
+        }
+      },
+      {
+        "scenario": "Score d'un trajet excellent",
+        "input": {
+          "tripData": {
+            "id": "trip_excellent",
+            "netEarnings": 30.0,
+            "distance": 12.0,
+            "duration": 60,
+            "commission": 5.0,
+            "finalPrice": 35.0,
+            "platform": "UBER"
+          }
+        },
+        "output": {
+          "tripId": "trip_excellent",
+          "score": 86,
+          "reasons": [
+            "Excellent rapport distance (2.5€/km)",
+            "Excellent rendement horaire (30€/h)",
+            "Commission faible (14.3%)",
+            "Durée optimale (60min)"
+          ],
+          "metrics": {
+            "netPerKm": 2.5,
+            "netPerHour": 30,
+            "commissionRate": 14.3
+          }
+        }
+      },
+      {
+        "scenario": "Score d'un trajet peu rentable",
+        "input": {
+          "tripData": {
+            "id": "trip_poor",
+            "netEarnings": 8.0,
+            "distance": 15.0,
+            "duration": 120,
+            "commission": 12.0,
+            "finalPrice": 20.0,
+            "platform": "HEETCH"
+          }
+        },
+        "output": {
+          "tripId": "trip_poor",
+          "score": 28,
+          "reasons": [
+            "Faible rapport distance (0.53€/km)",
+            "Faible rendement horaire (4€/h)",
+            "Commission élevée (60.0%)",
+            "Course très longue (120min)"
+          ],
+          "metrics": {
+            "netPerKm": 0.53,
+            "netPerHour": 4,
+            "commissionRate": 60.0
+          }
+        }
+      },
+      {
+        "scenario": "Chauffeur sans problèmes détectés",
+        "input": {
+          "driverId": "driver_good",
+          "city": "Nice",
+          "tripsLast7d": [
+            {
+              "id": "trip_1",
+              "startedAt": "2024-01-15T10:00:00.000Z",
+              "duration": 45,
+              "netEarnings": 20.0
+            },
+            {
+              "id": "trip_2",
+              "startedAt": "2024-01-15T12:00:00.000Z",
+              "duration": 60,
+              "netEarnings": 25.0
+            }
+          ],
+          "zoneSnapshot": {
+            "city": "Nice",
+            "demandScore": 60,
+            "topZones": [
+              { "name": "Centre-ville", "demandScore": 65, "estimatedWaitTime": 10 }
+            ]
+          }
+        },
+        "output": {
+          "insights": []
+        }
+      },
+      {
+        "scenario": "Situation multi-insights (priorités multiples)",
+        "input": {
+          "driverId": "driver_multi",
+          "city": "Toulouse",
+          "tripsLast7d": [
+            {
+              "id": "trip_1",
+              "startedAt": "2024-01-15T06:00:00.000Z",
+              "duration": 300,
+              "netEarnings": 35.0
+            },
+            {
+              "id": "trip_2",
+              "startedAt": "2024-01-15T11:00:00.000Z",
+              "duration": 240,
+              "netEarnings": 25.0
+            },
+            {
+              "id": "trip_3",
+              "startedAt": "2024-01-15T15:00:00.000Z",
+              "duration": 180,
+              "netEarnings": 15.0
+            }
+          ],
+          "zoneSnapshot": {
+            "city": "Toulouse",
+            "demandScore": 88,
+            "topZones": [
+              { "name": "Capitole", "demandScore": 95, "estimatedWaitTime": 3 },
+              { "name": "Aéroport", "demandScore": 85, "estimatedWaitTime": 12 }
+            ]
+          }
+        },
+        "output": {
+          "insights": [
+            {
+              "id": "pause_driver_multi_1699123456789",
+              "type": "PAUSE",
+              "priority": "CRITICAL",
+              "title": "Temps de pause recommandé",
+              "message": "Vous avez travaillé 12.0h ces dernières 24h. Une pause vous permettra de rester performant et en sécurité.",
+              "data": {
+                "totalDutyHours": 12.0,
+                "maxRecommended": 6,
+                "totalTrips": 3
+              },
+              "expiresAt": "2024-01-16T14:30:00.000Z"
+            },
+            {
+              "id": "zone_driver_multi_1699123456789",
+              "type": "ZONE",
+              "priority": "HIGH",
+              "title": "Forte demande à Toulouse",
+              "message": "La demande est élevée (88%) ! Ces zones sont particulièrement actives : Capitole, Aéroport.",
+              "data": {
+                "cityDemandScore": 88,
+                "recommendedZones": [
+                  { "name": "Capitole", "demandScore": 95, "estimatedWaitTime": 3 },
+                  { "name": "Aéroport", "demandScore": 85, "estimatedWaitTime": 12 }
+                ]
+              },
+              "expiresAt": "2024-01-16T14:30:00.000Z"
+            },
+            {
+              "id": "pricing_driver_multi_1699123456789",
+              "type": "PRICING",
+              "priority": "MEDIUM",
+              "title": "Revenus en dessous du seuil",
+              "message": "Vos revenus sont de 6€/h, en dessous du seuil de 18€/h. Considérez ces zones plus actives : Capitole, Aéroport.",
+              "data": {
+                "currentNetPerHour": 6.25,
+                "targetNetPerHour": 18,
+                "totalTrips": 3,
+                "suggestedZones": [
+                  { "name": "Capitole", "demandScore": 95, "estimatedWaitTime": 3 },
+                  { "name": "Aéroport", "demandScore": 85, "estimatedWaitTime": 12 }
+                ]
+              },
+              "expiresAt": "2024-01-16T14:30:00.000Z"
+            }
+          ]
+        }
+      }
+    ]
+  },
+  "router_endpoints": {
+    "description": "Exemples d'appels aux endpoints tRPC",
+    "examples": [
+      {
+        "endpoint": "insights.current",
+        "method": "query",
+        "input": {
+          "city": "Paris"
+        },
+        "output": {
+          "insights": [
+            {
+              "id": "zone_user_123_1699123456789",
+              "type": "ZONE",
+              "priority": "HIGH",
+              "title": "Forte demande à Paris",
+              "message": "La demande est élevée (85%) ! Ces zones sont particulièrement actives : Centre-ville, Gare du Nord.",
+              "data": {
+                "cityDemandScore": 85,
+                "recommendedZones": [
+                  { "name": "Centre-ville", "demandScore": 90, "estimatedWaitTime": 5 }
+                ]
+              },
+              "expiresAt": "2024-01-16T14:30:00.000Z"
+            }
+          ],
+          "stats": {
+            "tripsLast7d": 12,
+            "averageScore": 72,
+            "totalNetEarnings": 285.50,
+            "city": "Paris"
+          },
+          "zoneSnapshot": {
+            "city": "Paris",
+            "demandScore": 85,
+            "topZones": [
+              { "name": "Centre-ville", "demandScore": 90, "estimatedWaitTime": 5 },
+              { "name": "Gare du Nord", "demandScore": 78, "estimatedWaitTime": 8 },
+              { "name": "Châtelet", "demandScore": 82, "estimatedWaitTime": 6 },
+              { "name": "Quartier d'affaires", "demandScore": 65, "estimatedWaitTime": 12 }
+            ]
+          }
+        }
+      },
+      {
+        "endpoint": "insights.scoreTrip",
+        "method": "query",
+        "input": {
+          "tripId": "trip_abc123"
+        },
+        "output": {
+          "tripId": "trip_abc123",
+          "tripData": {
+            "id": "trip_abc123",
+            "netEarnings": 22.50,
+            "distance": 9.5,
+            "duration": 75,
+            "commission": 4.50,
+            "finalPrice": 27.00,
+            "startedAt": "2024-01-15T14:30:00.000Z",
+            "completedAt": "2024-01-15T15:45:00.000Z",
+            "platform": "BOLT"
+          },
+          "score": 68,
+          "reasons": [
+            "Bon rapport distance (2.37€/km)",
+            "Bon rendement horaire (18€/h)",
+            "Commission modérée (16.7%)",
+            "Durée optimale (75min)"
+          ],
+          "metrics": {
+            "netPerKm": 2.37,
+            "netPerHour": 18,
+            "commissionRate": 16.7
+          }
+        }
+      }
+    ]
+  },
+  "business_rules": {
+    "description": "Règles métier utilisées par le système",
+    "zone_insight": {
+      "trigger": "demandScore > 70",
+      "priority": "HIGH",
+      "filters": "Zones avec demandScore >= 75",
+      "max_zones": 3
+    },
+    "pause_insight": {
+      "trigger": "totalDutyHours > 6 (dernières 24h)",
+      "priority_high": "6h < hours <= 8h",
+      "priority_critical": "hours > 8h"
+    },
+    "pricing_insight": {
+      "trigger": "averageNetPerHour < 18€/h ET totalTrips >= 3",
+      "priority": "MEDIUM",
+      "suggestion_zones": "Zones avec demandScore >= 60"
+    },
+    "trip_scoring": {
+      "excellent_net_per_km": ">= 2.5€",
+      "good_net_per_km": ">= 1.8€",
+      "poor_net_per_km": "< 1.2€",
+      "excellent_net_per_hour": ">= 25€",
+      "good_net_per_hour": ">= 18€",
+      "poor_net_per_hour": "< 12€",
+      "low_commission": "<= 15%",
+      "moderate_commission": "<= 20%",
+      "high_commission": "> 25%",
+      "optimal_duration": "45-120 minutes",
+      "short_trip": "< 20 minutes",
+      "long_trip": "> 180 minutes"
+    }
+  }
+}

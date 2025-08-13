@@ -1,0 +1,462 @@
+{
+  "zones_service_examples": {
+    "description": "Exemples de retours JSON du service de zones avec heatmap et cache DB",
+    "examples": [
+      {
+        "scenario": "Premier appel pour Paris - Nouveau snapshot créé",
+        "endpoint": "zones.current",
+        "input": {
+          "city": "Paris"
+        },
+        "output": {
+          "id": "cltx7k8m50000126s4b8d9e1f",
+          "city": "Paris",
+          "demandScore": 73,
+          "cached": false,
+          "heatmap": {
+            "type": "FeatureCollection",
+            "features": [
+              {
+                "type": "Feature",
+                "geometry": {
+                  "type": "Polygon",
+                  "coordinates": [[
+                    [2.2243, 48.8155],
+                    [2.3095, 48.8155],
+                    [2.3095, 48.8587],
+                    [2.2243, 48.8587],
+                    [2.2243, 48.8155]
+                  ]]
+                },
+                "properties": {
+                  "demandScore": 85,
+                  "intensity": 0.85,
+                  "zoneName": "Centre-ville"
+                }
+              },
+              {
+                "type": "Feature",
+                "geometry": {
+                  "type": "Polygon",
+                  "coordinates": [[
+                    [2.3095, 48.8155],
+                    [2.3947, 48.8155],
+                    [2.3947, 48.8587],
+                    [2.3095, 48.8587],
+                    [2.3095, 48.8155]
+                  ]]
+                },
+                "properties": {
+                  "demandScore": 78,
+                  "intensity": 0.78,
+                  "zoneName": "Gare du Nord"
+                }
+              },
+              {
+                "type": "Feature",
+                "geometry": {
+                  "type": "Polygon",
+                  "coordinates": [[
+                    [2.3947, 48.8155],
+                    [2.4699, 48.8155],
+                    [2.4699, 48.8587],
+                    [2.3947, 48.8587],
+                    [2.3947, 48.8155]
+                  ]]
+                },
+                "properties": {
+                  "demandScore": 82,
+                  "intensity": 0.82,
+                  "zoneName": "Châtelet"
+                }
+              },
+              {
+                "type": "Feature",
+                "geometry": {
+                  "type": "Point",
+                  "coordinates": [2.3522, 48.8566]
+                },
+                "properties": {
+                  "demandScore": 67,
+                  "intensity": 0.67
+                }
+              },
+              {
+                "type": "Feature",
+                "geometry": {
+                  "type": "Point",
+                  "coordinates": [2.2876, 48.8738]
+                },
+                "properties": {
+                  "demandScore": 45,
+                  "intensity": 0.45
+                }
+              },
+              {
+                "type": "Feature",
+                "geometry": {
+                  "type": "Point",
+                  "coordinates": [2.3312, 48.8321]
+                },
+                "properties": {
+                  "demandScore": 89,
+                  "intensity": 0.89
+                }
+              }
+            ]
+          },
+          "topZones": [
+            {
+              "name": "Centre-ville",
+              "demandScore": 85,
+              "estimatedWaitTime": 5,
+              "bounds": {
+                "north": 48.8587,
+                "south": 48.8155,
+                "east": 2.3095,
+                "west": 2.2243
+              }
+            },
+            {
+              "name": "Châtelet",
+              "demandScore": 82,
+              "estimatedWaitTime": 8,
+              "bounds": {
+                "north": 48.8587,
+                "south": 48.8155,
+                "east": 2.4699,
+                "west": 2.3947
+              }
+            },
+            {
+              "name": "Gare du Nord",
+              "demandScore": 78,
+              "estimatedWaitTime": 12,
+              "bounds": {
+                "north": 48.8587,
+                "south": 48.8155,
+                "east": 2.3947,
+                "west": 2.3095
+              }
+            }
+          ],
+          "validUntil": "2024-01-15T15:40:00.000Z",
+          "createdAt": "2024-01-15T15:30:00.000Z"
+        }
+      },
+      {
+        "scenario": "Deuxième appel pour Paris - Données du cache",
+        "endpoint": "zones.current",
+        "input": {
+          "city": "Paris"
+        },
+        "output": {
+          "id": "cltx7k8m50000126s4b8d9e1f",
+          "city": "Paris",
+          "demandScore": 73,
+          "cached": true,
+          "heatmap": {
+            "type": "FeatureCollection",
+            "features": [
+              "... mêmes données que le premier appel ..."
+            ]
+          },
+          "topZones": [
+            "... mêmes zones que le premier appel ..."
+          ],
+          "validUntil": "2024-01-15T15:40:00.000Z",
+          "createdAt": "2024-01-15T15:30:00.000Z"
+        }
+      },
+      {
+        "scenario": "Snapshot pour Lyon avec zones spécifiques",
+        "endpoint": "zones.current", 
+        "input": {
+          "city": "Lyon"
+        },
+        "output": {
+          "id": "cltx7k8m50000126s4b8d9e2g",
+          "city": "Lyon",
+          "demandScore": 61,
+          "cached": false,
+          "heatmap": {
+            "type": "FeatureCollection",
+            "features": [
+              {
+                "type": "Feature",
+                "geometry": {
+                  "type": "Polygon",
+                  "coordinates": [[
+                    [4.7357, 45.7113],
+                    [4.8024, 45.7113],
+                    [4.8024, 45.7640],
+                    [4.7357, 45.7640],
+                    [4.7357, 45.7113]
+                  ]]
+                },
+                "properties": {
+                  "demandScore": 72,
+                  "intensity": 0.72,
+                  "zoneName": "Presqu'île"
+                }
+              },
+              {
+                "type": "Feature",
+                "geometry": {
+                  "type": "Point",
+                  "coordinates": [4.8357, 45.7640]
+                },
+                "properties": {
+                  "demandScore": 58,
+                  "intensity": 0.58
+                }
+              }
+            ]
+          },
+          "topZones": [
+            {
+              "name": "Presqu'île",
+              "demandScore": 72,
+              "estimatedWaitTime": 7,
+              "bounds": {
+                "north": 45.7640,
+                "south": 45.7113,
+                "east": 4.8024,
+                "west": 4.7357
+              }
+            },
+            {
+              "name": "Part-Dieu",
+              "demandScore": 68,
+              "estimatedWaitTime": 10,
+              "bounds": {
+                "north": 45.7640,
+                "south": 45.7113,
+                "east": 4.8691,
+                "west": 4.8024
+              }
+            },
+            {
+              "name": "Vieux Lyon",
+              "demandScore": 65,
+              "estimatedWaitTime": 15,
+              "bounds": {
+                "north": 45.7640,
+                "south": 45.7113,
+                "east": 4.9357,
+                "west": 4.8691
+              }
+            }
+          ],
+          "validUntil": "2024-01-15T15:45:00.000Z",
+          "createdAt": "2024-01-15T15:35:00.000Z"
+        }
+      },
+      {
+        "scenario": "Ville inconnue - Utilise données par défaut de Paris",
+        "endpoint": "zones.current",
+        "input": {
+          "city": "VilleInconnue"
+        },
+        "output": {
+          "id": "cltx7k8m50000126s4b8d9e3h",
+          "city": "VilleInconnue",
+          "demandScore": 55,
+          "cached": false,
+          "heatmap": {
+            "type": "FeatureCollection",
+            "features": [
+              "... utilise les bounds et structure de Paris ..."
+            ]
+          },
+          "topZones": [
+            {
+              "name": "Centre-ville",
+              "demandScore": 60,
+              "estimatedWaitTime": 12,
+              "bounds": {
+                "north": 48.8587,
+                "south": 48.8155,
+                "east": 2.3095,
+                "west": 2.2243
+              }
+            },
+            {
+              "name": "Gare du Nord", 
+              "demandScore": 58,
+              "estimatedWaitTime": 9,
+              "bounds": {
+                "north": 48.8587,
+                "south": 48.8155,
+                "east": 2.3947,
+                "west": 2.3095
+              }
+            },
+            {
+              "name": "Châtelet",
+              "demandScore": 52,
+              "estimatedWaitTime": 14,
+              "bounds": {
+                "north": 48.8587,
+                "south": 48.8155,
+                "east": 2.4699,
+                "west": 2.3947
+              }
+            }
+          ],
+          "validUntil": "2024-01-15T15:50:00.000Z",
+          "createdAt": "2024-01-15T15:40:00.000Z"
+        }
+      },
+      {
+        "scenario": "Snapshot après expiration du cache",
+        "endpoint": "zones.current",
+        "input": {
+          "city": "Marseille"
+        },
+        "output": {
+          "id": "cltx7k8m50000126s4b8d9e4i",
+          "city": "Marseille",
+          "demandScore": 84,
+          "cached": false,
+          "heatmap": {
+            "type": "FeatureCollection",
+            "features": [
+              {
+                "type": "Feature",
+                "geometry": {
+                  "type": "Polygon",
+                  "coordinates": [[
+                    [5.2698, 43.2365],
+                    [5.3365, 43.2365],
+                    [5.3365, 43.2765],
+                    [5.2698, 43.2765],
+                    [5.2698, 43.2365]
+                  ]]
+                },
+                "properties": {
+                  "demandScore": 92,
+                  "intensity": 0.92,
+                  "zoneName": "Vieux-Port"
+                }
+              }
+            ]
+          },
+          "topZones": [
+            {
+              "name": "Vieux-Port",
+              "demandScore": 92,
+              "estimatedWaitTime": 4,
+              "bounds": {
+                "north": 43.2765,
+                "south": 43.2365,
+                "east": 5.3365,
+                "west": 5.2698
+              }
+            },
+            {
+              "name": "Canebière",
+              "demandScore": 87,
+              "estimatedWaitTime": 6,
+              "bounds": {
+                "north": 43.2765,
+                "south": 43.2365,
+                "east": 5.4031,
+                "west": 5.3365
+              }
+            },
+            {
+              "name": "République",
+              "demandScore": 81,
+              "estimatedWaitTime": 11,
+              "bounds": {
+                "north": 43.2765,
+                "south": 43.2365,
+                "east": 5.4698,
+                "west": 5.4031
+              }
+            }
+          ],
+          "validUntil": "2024-01-15T16:00:00.000Z",
+          "createdAt": "2024-01-15T15:50:00.000Z"
+        }
+      }
+    ]
+  },
+  "heatmap_structure": {
+    "description": "Structure détaillée de la heatmap GeoJSON",
+    "geojson_spec": "https://geojson.org/",
+    "feature_types": {
+      "rectangles": {
+        "description": "Polygones représentant les zones principales",
+        "geometry_type": "Polygon",
+        "coordinates_format": "[[lng, lat], [lng, lat], ...]",
+        "properties": {
+          "demandScore": "0-100 (score de demande)",
+          "intensity": "0.0-1.0 (pour l'affichage heatmap)",
+          "zoneName": "string (nom de la zone)"
+        }
+      },
+      "points": {
+        "description": "Points aléatoires pour plus de granularité",
+        "geometry_type": "Point", 
+        "coordinates_format": "[lng, lat]",
+        "properties": {
+          "demandScore": "0-100 (score de demande)",
+          "intensity": "0.0-1.0 (pour l'affichage heatmap)"
+        }
+      }
+    }
+  },
+  "cache_behavior": {
+    "description": "Comportement du système de cache",
+    "cache_duration": "10 minutes",
+    "validation": "validUntil > now",
+    "scenarios": {
+      "cache_hit": "Retourne les données existantes si validUntil > now",
+      "cache_miss": "Génère de nouvelles données mock si cache expiré",
+      "first_call": "Toujours génère de nouvelles données pour une ville"
+    },
+    "database_fields": {
+      "id": "Identifiant unique du snapshot",
+      "city": "Nom de la ville (clé unique)",
+      "demandScore": "Score global de demande (0-100)",
+      "heatmapData": "JSON avec FeatureCollection GeoJSON",
+      "topZones": "JSON avec array des 3 meilleures zones",
+      "validUntil": "Timestamp d'expiration du cache",
+      "createdAt": "Timestamp de création",
+      "updatedAt": "Timestamp de dernière mise à jour"
+    }
+  },
+  "supported_cities": {
+    "description": "Villes avec données spécifiques configurées",
+    "cities": [
+      {
+        "name": "Paris",
+        "center": [2.3522, 48.8566],
+        "zones": ["Centre-ville", "Gare du Nord", "Châtelet", "Montparnasse", "République", "Bastille"]
+      },
+      {
+        "name": "Lyon", 
+        "center": [4.8357, 45.7640],
+        "zones": ["Presqu'île", "Vieux Lyon", "Part-Dieu", "Bellecour", "Croix-Rousse", "Perrache"]
+      },
+      {
+        "name": "Marseille",
+        "center": [5.3698, 43.2965],
+        "zones": ["Vieux-Port", "Canebière", "République", "Castellane", "Saint-Charles", "Joliette"]
+      },
+      {
+        "name": "Toulouse",
+        "center": [1.4442, 43.6047],
+        "zones": ["Capitole", "Matabiau", "Jean-Jaurès", "Compans", "Wilson", "Esquirol"]
+      },
+      {
+        "name": "Nice",
+        "center": [7.2619, 43.7102],
+        "zones": ["Vieux-Nice", "Promenade", "Libération", "Gare", "Port", "Acropolis"]
+      }
+    ],
+    "fallback": "Villes inconnues utilisent les données de Paris"
+  }
+}
