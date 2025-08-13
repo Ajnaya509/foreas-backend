@@ -31,6 +31,37 @@ app.post('/create-checkout-session', async (req, res) => {
   }
 });
 
+// Webhook endpoint for Stripe events
+app.post('/api/webhooks/stripe', bodyParser.raw({type: 'application/json'}), (req, res) => {
+  const sig = req.headers['stripe-signature'] as string;
+  const endpointSecret = process.env['STRIPE_WEBHOOK_SECRET'] as string;
+  
+  let event;
+  try {
+    event = stripe.webhooks.constructEvent(req.body, sig, endpointSecret);
+  } catch (err:any) {
+    console.log('Webhook signature verification failed.', err.message);
+    return res.status(400).send(`Webhook Error: ${err.message}`);
+  }
+
+  // Handle the event
+  switch (event.type) {
+    case 'checkout.session.completed':
+      console.log('Payment successful!', event.data.object);
+      break;
+    case 'invoice.payment_succeeded':
+      console.log('Invoice paid!', event.data.object);
+      break;
+    case 'payment_intent.succeeded':
+      console.log('Payment intent succeeded!', event.data.object);
+      break;
+    default:
+      console.log(`Unhandled event type ${event.type}`);
+  }
+
+  res.json({received: true});
+});
+
 app.get('/health',(_,res)=>res.json({ok:true}));
 
 const port = process.env['PORT'] || 4242;
