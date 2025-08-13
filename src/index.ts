@@ -7,6 +7,11 @@ import bodyParser from 'body-parser';
 dotenv.config();
 const app = express();
 app.use(cors());
+
+// Raw body for webhooks (must be before json parser)
+app.use('/api/webhooks/stripe', bodyParser.raw({type: 'application/json'}));
+
+// JSON parser for other routes
 app.use(bodyParser.json());
 
 const stripe = new Stripe(process.env['STRIPE_SECRET_KEY'] as string, { apiVersion: '2023-10-16' });
@@ -32,7 +37,7 @@ app.post('/create-checkout-session', async (req, res) => {
 });
 
 // Webhook endpoint for Stripe events
-app.post('/api/webhooks/stripe', bodyParser.raw({type: 'application/json'}), (req, res) => {
+app.post('/api/webhooks/stripe', (req, res) => {
   const sig = req.headers['stripe-signature'] as string;
   const endpointSecret = process.env['STRIPE_WEBHOOK_SECRET'] as string;
   
