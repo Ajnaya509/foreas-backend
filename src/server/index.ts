@@ -13,6 +13,7 @@ import { appLogger } from '@/utils/logger';
 import { authRateLimit, stripeRateLimit } from '@/middleware/rateLimiter';
 import { createContext } from './context';
 import { appRouter } from './routers';
+import { aiProxyRouter } from './api/ai-proxy';
 
 // Initialiser Sentry si configuré
 if (env.SENTRY_DSN) {
@@ -43,6 +44,12 @@ const app = express();
 // Middlewares de base
 app.use(cors());
 app.use(express.json());
+
+/**
+ * AI Proxy routes - Forwarde vers AI Backend
+ * App Mobile → /api/ai/* → AI Backend /api/ajnaya/*
+ */
+app.use('/api/ai', aiProxyRouter);
 
 /**
  * Health check endpoint

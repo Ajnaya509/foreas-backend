@@ -81,6 +81,21 @@ const envSchema = z.object({
     })
     .optional(),
 
+  // AI Backend Proxy
+  FOREAS_SERVICE_KEY: z
+    .string({
+      required_error: 'FOREAS_SERVICE_KEY is required for AI proxy',
+    })
+    .min(1, 'FOREAS_SERVICE_KEY cannot be empty')
+    .regex(/^foreas-/, 'FOREAS_SERVICE_KEY must start with foreas-'),
+
+  AI_BACKEND_URL: z
+    .string()
+    .url({
+      message: 'AI_BACKEND_URL must be a valid URL',
+    })
+    .default('https://foreas-ai-backend-production.up.railway.app'),
+
   // Node environment
   NODE_ENV: z
     .enum(['development', 'test', 'production'], {
