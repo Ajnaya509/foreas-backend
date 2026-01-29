@@ -52,10 +52,9 @@ app.get('/health', (req, res) => {
 // ============================================
 // AI PROXY ROUTES - App Mobile → AI Backend
 // ============================================
-app.use(express.json());
 
-// POST /api/ai/chat
-app.post('/api/ai/chat', async (req, res) => {
+// POST /api/ai/chat (doit être avant express.json global)
+app.post('/api/ai/chat', express.json(), async (req, res) => {
   console.log('[AI-PROXY] 📨 /chat request');
   if (!SERVICE_KEY) {
     return res.status(500).json({ error: 'FOREAS_SERVICE_KEY not configured' });
@@ -78,71 +77,81 @@ app.post('/api/ai/chat', async (req, res) => {
   }
 });
 
-// POST /api/ai/transcribe - Supporte multipart/form-data
+// POST /api/ai/transcribe - UNIQUEMENT multipart/form-data
 app.post('/api/ai/transcribe', upload.single('audio'), async (req, res) => {
-  console.log('[AI-PROXY] 📨 /transcribe request');
-  console.log('[AI-PROXY] Content-Type:', req.headers['content-type']);
-  console.log('[AI-PROXY] Has file:', !!req.file);
+  const ct = req.headers['content-type'] || 'unknown';
+  console.log('[AI-PROXY][TRANSCRIBE] ct=', ct);
+  console.log('[AI-PROXY][TRANSCRIBE] req.file=', !!req.file);
+  console.log('[AI-PROXY][TRANSCRIBE] req.body keys=', Object.keys(req.body || {}));
 
   if (!SERVICE_KEY) {
     return res.status(500).json({ error: 'FOREAS_SERVICE_KEY not configured' });
   }
 
+  // OBLIGATOIRE: fichier audio requis
+  if (!req.file) {
+    console.log('[AI-PROXY][TRANSCRIBE] ❌ NO FILE received by Stripe backend');
+    return res.status(400).json({
+      error: 'missing_audio',
+      message: 'No audio field received by Stripe backend. Use multipart/form-data with field "audio".',
+      contentType: ct,
+      receivedFields: Object.keys(req.body || {}),
+    });
+  }
+
+  const filename = req.body?.filename || req.file.originalname || 'audio.m4a';
+  const format = req.body?.format || req.file.mimetype || 'audio/m4a';
+
+  console.log('[AI-PROXY][TRANSCRIBE] 📎 File received:', {
+    originalname: req.file.originalname,
+    mimetype: req.file.mimetype,
+    size: req.file.size,
+    filename,
+    format
+  });
+
   try {
-    // Si on a reçu un fichier via multipart
-    if (req.file) {
-      console.log('[AI-PROXY] 📎 Audio file received:', {
-        originalname: req.file.originalname,
-        mimetype: req.file.mimetype,
-        size: req.file.size
-      });
+    // Créer FormData pour le AI backend
+    const fd = new FormData();
+    fd.append('audio', req.file.buffer, {
+      filename: filename,
+      contentType: req.file.mimetype || 'audio/mp4'
+    });
+    fd.append('filename', filename);
+    fd.append('format', format);
+    if (req.body.language) fd.append('language', req.body.language);
 
-      // Créer FormData pour le AI backend
-      const formData = new FormData();
-      formData.append('audio', req.file.buffer, {
-        filename: req.file.originalname || 'audio.m4a',
-        contentType: req.file.mimetype || 'audio/m4a'
-      });
+    const headers = {
+      ...fd.getHeaders(),
+      'X-FOREAS-SERVICE-KEY': SERVICE_KEY,
+    };
 
-      // Ajouter d'autres champs si présents
-      if (req.body.language) formData.append('language', req.body.language);
+    console.log('[AI-PROXY][TRANSCRIBE] 📤 Forwarding to AI backend...');
 
-      const response = await fetch(`${AI_BACKEND}/api/ajnaya/transcribe`, {
-        method: 'POST',
-        headers: {
-          'X-FOREAS-SERVICE-KEY': SERVICE_KEY,
-          ...formData.getHeaders()
-        },
-        body: formData
-      });
+    const response = await fetch(`${AI_BACKEND}/api/ajnaya/transcribe`, {
+      method: 'POST',
+      headers,
+      body: fd,
+    });
 
-      const data = await response.json();
-      console.log('[AI-PROXY] ✅ Transcribe response:', response.status);
-      return res.status(response.status).json(data);
+    const text = await response.text();
+    console.log('[AI-PROXY][TRANSCRIBE] status=', response.status, 'body=', text.slice(0, 800));
 
-    } else {
-      // Fallback JSON si pas de fichier
-      console.log('[AI-PROXY] ⚠️ No file, trying JSON body');
-      const response = await fetch(`${AI_BACKEND}/api/ajnaya/transcribe`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'X-FOREAS-SERVICE-KEY': SERVICE_KEY
-        },
-        body: JSON.stringify(req.body)
-      });
-      const data = await response.json();
-      console.log('[AI-PROXY] ✅ Transcribe response (JSON):', response.status);
-      return res.status(response.status).json(data);
+    // Parse JSON si possible
+    try {
+      const json = JSON.parse(text);
+      return res.status(response.status).json(json);
+    } catch {
+      return res.status(response.status).type('text/plain').send(text);
     }
-  } catch (err) {
-    console.error('[AI-PROXY] ❌ Transcribe error:', err.message);
-    return res.status(500).json({ error: 'AI proxy error', message: err.message });
+  } catch (e) {
+    console.error('[AI-PROXY][TRANSCRIBE] ❌ Exception:', e);
+    return res.status(500).json({ error: 'proxy_error', message: String(e?.message || e) });
   }
 });
 
 // POST /api/ai/tts
-app.post('/api/ai/tts', async (req, res) => {
+app.post('/api/ai/tts', express.json(), async (req, res) => {
   console.log('[AI-PROXY] 📨 /tts request');
   if (!SERVICE_KEY) {
     return res.status(500).json({ error: 'FOREAS_SERVICE_KEY not configured' });
@@ -183,7 +192,8 @@ app.get('/api/ai/health', async (req, res) => {
     return res.json({
       proxy: 'ok',
       aiBackend: data,
-      serviceKeyConfigured: !!SERVICE_KEY
+      serviceKeyConfigured: !!SERVICE_KEY,
+      version: '2.0.0-multipart'
     });
   } catch (err) {
     return res.status(503).json({
