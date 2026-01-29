@@ -1,7 +1,12 @@
 const express = require('express');
 const bodyParser = require('body-parser');
+const multer = require('multer');
+const FormData = require('form-data');
 const app = express();
 const stripe = require('stripe')(process.env.STRIPE_SECRET_KEY);
+
+// Multer pour traiter les fichiers audio (stockage en mémoire)
+const upload = multer({ storage: multer.memoryStorage() });
 
 // AI Proxy Configuration
 const AI_BACKEND = process.env.AI_BACKEND_URL || 'https://foreas-ai-backend-production.up.railway.app';
@@ -73,24 +78,63 @@ app.post('/api/ai/chat', async (req, res) => {
   }
 });
 
-// POST /api/ai/transcribe
-app.post('/api/ai/transcribe', async (req, res) => {
+// POST /api/ai/transcribe - Supporte multipart/form-data
+app.post('/api/ai/transcribe', upload.single('audio'), async (req, res) => {
   console.log('[AI-PROXY] 📨 /transcribe request');
+  console.log('[AI-PROXY] Content-Type:', req.headers['content-type']);
+  console.log('[AI-PROXY] Has file:', !!req.file);
+
   if (!SERVICE_KEY) {
     return res.status(500).json({ error: 'FOREAS_SERVICE_KEY not configured' });
   }
+
   try {
-    const response = await fetch(`${AI_BACKEND}/api/ajnaya/transcribe`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'X-FOREAS-SERVICE-KEY': SERVICE_KEY
-      },
-      body: JSON.stringify(req.body)
-    });
-    const data = await response.json();
-    console.log('[AI-PROXY] ✅ Transcribe response:', response.status);
-    return res.status(response.status).json(data);
+    // Si on a reçu un fichier via multipart
+    if (req.file) {
+      console.log('[AI-PROXY] 📎 Audio file received:', {
+        originalname: req.file.originalname,
+        mimetype: req.file.mimetype,
+        size: req.file.size
+      });
+
+      // Créer FormData pour le AI backend
+      const formData = new FormData();
+      formData.append('audio', req.file.buffer, {
+        filename: req.file.originalname || 'audio.m4a',
+        contentType: req.file.mimetype || 'audio/m4a'
+      });
+
+      // Ajouter d'autres champs si présents
+      if (req.body.language) formData.append('language', req.body.language);
+
+      const response = await fetch(`${AI_BACKEND}/api/ajnaya/transcribe`, {
+        method: 'POST',
+        headers: {
+          'X-FOREAS-SERVICE-KEY': SERVICE_KEY,
+          ...formData.getHeaders()
+        },
+        body: formData
+      });
+
+      const data = await response.json();
+      console.log('[AI-PROXY] ✅ Transcribe response:', response.status);
+      return res.status(response.status).json(data);
+
+    } else {
+      // Fallback JSON si pas de fichier
+      console.log('[AI-PROXY] ⚠️ No file, trying JSON body');
+      const response = await fetch(`${AI_BACKEND}/api/ajnaya/transcribe`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-FOREAS-SERVICE-KEY': SERVICE_KEY
+        },
+        body: JSON.stringify(req.body)
+      });
+      const data = await response.json();
+      console.log('[AI-PROXY] ✅ Transcribe response (JSON):', response.status);
+      return res.status(response.status).json(data);
+    }
   } catch (err) {
     console.error('[AI-PROXY] ❌ Transcribe error:', err.message);
     return res.status(500).json({ error: 'AI proxy error', message: err.message });
