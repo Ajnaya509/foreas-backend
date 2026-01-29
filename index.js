@@ -121,28 +121,40 @@ app.post('/api/ai/transcribe', upload.single('audio'), async (req, res) => {
     fd.append('format', format);
     if (req.body.language) fd.append('language', req.body.language);
 
-    const headers = {
-      ...fd.getHeaders(),
-      'X-FOREAS-SERVICE-KEY': SERVICE_KEY,
-    };
-
     console.log('[AI-PROXY][TRANSCRIBE] 📤 Forwarding to AI backend...');
 
-    const response = await fetch(`${AI_BACKEND}/api/ajnaya/transcribe`, {
-      method: 'POST',
-      headers,
-      body: fd,
+    // Utiliser le module https natif pour envoyer le FormData
+    const https = require('https');
+    const url = new URL(`${AI_BACKEND}/api/ajnaya/transcribe`);
+
+    const response = await new Promise((resolve, reject) => {
+      const request = https.request({
+        hostname: url.hostname,
+        port: 443,
+        path: url.pathname,
+        method: 'POST',
+        headers: {
+          ...fd.getHeaders(),
+          'X-FOREAS-SERVICE-KEY': SERVICE_KEY,
+        }
+      }, (res) => {
+        let data = '';
+        res.on('data', chunk => data += chunk);
+        res.on('end', () => resolve({ status: res.statusCode, body: data }));
+      });
+
+      request.on('error', reject);
+      fd.pipe(request);
     });
 
-    const text = await response.text();
-    console.log('[AI-PROXY][TRANSCRIBE] status=', response.status, 'body=', text.slice(0, 800));
+    console.log('[AI-PROXY][TRANSCRIBE] status=', response.status, 'body=', response.body.slice(0, 800));
 
     // Parse JSON si possible
     try {
-      const json = JSON.parse(text);
+      const json = JSON.parse(response.body);
       return res.status(response.status).json(json);
     } catch {
-      return res.status(response.status).type('text/plain').send(text);
+      return res.status(response.status).type('text/plain').send(response.body);
     }
   } catch (e) {
     console.error('[AI-PROXY][TRANSCRIBE] ❌ Exception:', e);
