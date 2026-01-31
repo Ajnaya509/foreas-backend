@@ -24,7 +24,7 @@ import {
   logConsentEvent,
   upsertMarketingContact,
   supabaseAdmin,
-} from '../helpers/index.js';
+} from '../helpers/index';
 
 const router = Router();
 

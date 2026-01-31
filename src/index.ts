@@ -2,7 +2,7 @@ import 'dotenv/config';
 import express from 'express';
 import cors from 'cors';
 import Stripe from 'stripe';
-import { otpRouter } from './routes/otp.routes.js';
+import { otpRouter } from './routes/otp.routes';
 
 const app = express();
 app.use(cors());

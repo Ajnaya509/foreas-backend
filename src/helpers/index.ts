@@ -9,7 +9,7 @@ export {
   isValidFrenchMobile,
   maskPhone,
   getCountryCode,
-} from './phone.js';
+} from './phone';
 
 // OTP generation & verification
 export {
@@ -19,22 +19,22 @@ export {
   verifyOTP,
   generateSecureOTP,
   isValidOTPFormat,
-} from './otp.js';
+} from './otp';
 
 // Supabase admin client
 export {
   supabaseAdmin,
   checkSupabaseConnection,
   withRetry,
-} from './supabase.js';
+} from './supabase';
 
 // Rate limiting
 export {
   checkRateLimit,
   resetRateLimit,
   isBlocked,
-} from './rateLimit.js';
-export type { RateLimitResult } from './rateLimit.js';
+} from './rateLimit';
+export type { RateLimitResult } from './rateLimit';
 
 // Consent & RGPD
 export {
@@ -43,5 +43,5 @@ export {
   withdrawConsent,
   exportUserData,
   deleteUserData,
-} from './consent.js';
-export type { ConsentEventType, ConsentType, MarketingContact } from './consent.js';
+} from './consent';
+export type { ConsentEventType, ConsentType, MarketingContact } from './consent';

@@ -9,7 +9,7 @@
  * - Lockout de 30 minutes si dépassé
  */
 
-import { supabaseAdmin } from './supabase.js';
+import { supabaseAdmin } from './supabase';
 
 export interface RateLimitResult {
   allowed: boolean;

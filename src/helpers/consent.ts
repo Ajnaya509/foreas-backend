@@ -8,7 +8,7 @@
  * - Supprimer les données (droit à l'oubli)
  */
 
-import { supabaseAdmin } from './supabase.js';
+import { supabaseAdmin } from './supabase';
 
 // Types d'événements de consentement
 export type ConsentEventType =
