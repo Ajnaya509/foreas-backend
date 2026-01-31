@@ -7,16 +7,25 @@
 
 import { createClient, SupabaseClient } from '@supabase/supabase-js';
 
-// Variables d'environnement requises
-const SUPABASE_URL = process.env.SUPABASE_URL || process.env.EXPO_PUBLIC_SUPABASE_URL;
-const SUPABASE_SERVICE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_SERVICE_KEY;
+// Variables d'environnement requises (support multiple naming conventions)
+const SUPABASE_URL =
+  process.env.SUPABASE_URL ||
+  process.env.URL_SUPABASE ||
+  process.env.EXPO_PUBLIC_SUPABASE_URL ||
+  'https://fihvdvlhftcxhlnocqiq.supabase.co';
 
-if (!SUPABASE_URL) {
-  console.error('[Supabase] ❌ SUPABASE_URL non configurée');
-}
+const SUPABASE_SERVICE_KEY =
+  process.env.SUPABASE_SERVICE_ROLE_KEY ||
+  process.env.SUPABASE_SERVICE_KEY ||
+  process.env.CLÉ_DE_RÔLE_DU_SERVICE_SUPABASE ||
+  '';
+
+// Log config at startup
+console.log('[Supabase] Initializing with URL:', SUPABASE_URL);
+console.log('[Supabase] Service key configured:', SUPABASE_SERVICE_KEY ? 'YES' : 'NO');
 
 if (!SUPABASE_SERVICE_KEY) {
-  console.error('[Supabase] ❌ SUPABASE_SERVICE_ROLE_KEY non configurée');
+  console.warn('[Supabase] ⚠️ SUPABASE_SERVICE_ROLE_KEY non configurée - OTP features will fail');
 }
 
 /**
@@ -24,8 +33,8 @@ if (!SUPABASE_SERVICE_KEY) {
  * Bypass RLS pour les opérations backend
  */
 export const supabaseAdmin: SupabaseClient = createClient(
-  SUPABASE_URL || 'https://fihvdvlhftcxhlnocqiq.supabase.co',
-  SUPABASE_SERVICE_KEY || 'missing-service-key',
+  SUPABASE_URL,
+  SUPABASE_SERVICE_KEY || 'placeholder-key-will-fail',
   {
     auth: {
       autoRefreshToken: false,
