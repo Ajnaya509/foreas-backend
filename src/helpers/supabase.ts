@@ -17,38 +17,54 @@ const SUPABASE_URL =
 const SUPABASE_SERVICE_KEY =
   process.env.SUPABASE_SERVICE_ROLE_KEY ||
   process.env.SUPABASE_SERVICE_KEY ||
-  process.env.CLÉ_DE_RÔLE_DU_SERVICE_SUPABASE ||
   '';
 
-// Log config at startup
-console.log('[Supabase] Initializing with URL:', SUPABASE_URL);
-console.log('[Supabase] Service key configured:', SUPABASE_SERVICE_KEY ? 'YES' : 'NO');
+// Lazy initialization - don't create client until first use
+let _supabaseAdmin: SupabaseClient | null = null;
 
-if (!SUPABASE_SERVICE_KEY) {
-  console.warn('[Supabase] ⚠️ SUPABASE_SERVICE_ROLE_KEY non configurée - OTP features will fail');
+/**
+ * Get Supabase admin client (lazy initialized)
+ */
+export function getSupabaseAdmin(): SupabaseClient {
+  if (!_supabaseAdmin) {
+    console.log('[Supabase] Initializing client with URL:', SUPABASE_URL);
+    console.log('[Supabase] Service key configured:', SUPABASE_SERVICE_KEY ? 'YES' : 'NO');
+
+    if (!SUPABASE_SERVICE_KEY) {
+      console.warn('[Supabase] ⚠️ SUPABASE_SERVICE_ROLE_KEY non configurée - OTP features will fail');
+    }
+
+    _supabaseAdmin = createClient(
+      SUPABASE_URL,
+      SUPABASE_SERVICE_KEY || 'placeholder-key',
+      {
+        auth: {
+          autoRefreshToken: false,
+          persistSession: false,
+        },
+      }
+    );
+  }
+  return _supabaseAdmin;
 }
 
 /**
- * Client Supabase avec service_role key
- * Bypass RLS pour les opérations backend
+ * Legacy export for backward compatibility
+ * @deprecated Use getSupabaseAdmin() instead
  */
-export const supabaseAdmin: SupabaseClient = createClient(
-  SUPABASE_URL,
-  SUPABASE_SERVICE_KEY || 'placeholder-key-will-fail',
-  {
-    auth: {
-      autoRefreshToken: false,
-      persistSession: false,
-    },
+export const supabaseAdmin: SupabaseClient = new Proxy({} as SupabaseClient, {
+  get(_, prop) {
+    return (getSupabaseAdmin() as any)[prop];
   }
-);
+});
 
 /**
  * Vérifie que la connexion Supabase fonctionne
  */
 export async function checkSupabaseConnection(): Promise<boolean> {
   try {
-    const { error } = await supabaseAdmin.from('drivers').select('count').limit(1);
+    const client = getSupabaseAdmin();
+    const { error } = await client.from('drivers').select('count').limit(1);
     if (error) {
       console.error('[Supabase] ❌ Connection test failed:', error.message);
       return false;
