@@ -2,6 +2,7 @@ import 'dotenv/config';
 import express from 'express';
 import cors from 'cors';
 import Stripe from 'stripe';
+import { otpRouter } from './routes/otp.routes.js';
 
 const app = express();
 app.use(cors());
@@ -13,6 +14,7 @@ const stripe = new Stripe(process.env.STRIPE_SECRET_KEY as string, {
 
 // Health-check simple
 app.get('/health', (_req, res) => res.status(200).send('OK'));
+app.get('/', (_req, res) => res.send('FOREAS Stripe Backend is running'));
 
 // Webhook (route EXACTE)
 app.post('/api/webhooks/stripe', express.raw({ type: 'application/json' }), (req, res) => {
@@ -49,6 +51,11 @@ let lastPremium = 0;
 function markPremiumNow() {
   lastPremium = Date.now();
 }
+
+// =====================================
+// OTP Routes v2 - Production-grade
+// =====================================
+app.use('/api/auth', otpRouter);
 
 app.post('/create-checkout-session', async (_req, res) => {
   try {
@@ -88,4 +95,9 @@ app.get('/__routes', (_req, res) => {
 const PORT = process.env.PORT || 8080;
 app.listen(PORT, () => {
   console.log(`🚀 FOREAS backend listening on ${PORT}`);
+  console.log(`🔐 OTP Endpoints:`);
+  console.log(`   POST /api/auth/send-otp`);
+  console.log(`   POST /api/auth/verify-otp`);
+  console.log(`   POST /api/auth/finalize-signup`);
+  console.log(`   GET  /api/auth/otp/status`);
 });
