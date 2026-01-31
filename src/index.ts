@@ -2,7 +2,6 @@ import 'dotenv/config';
 import express from 'express';
 import cors from 'cors';
 import Stripe from 'stripe';
-import { otpRouter } from './routes/otp.routes';
 
 const app = express();
 app.use(cors());
@@ -53,9 +52,15 @@ function markPremiumNow() {
 }
 
 // =====================================
-// OTP Routes v2 - Production-grade
+// OTP Routes v2 - Production-grade (lazy loaded)
 // =====================================
-app.use('/api/auth', otpRouter);
+// Import dynamique pour éviter le chargement de @supabase/supabase-js au démarrage
+import('./routes/otp.routes.js').then(({ otpRouter }) => {
+  app.use('/api/auth', otpRouter);
+  console.log('[OTP] Routes mounted at /api/auth');
+}).catch(err => {
+  console.error('[OTP] Failed to load OTP routes:', err.message);
+});
 
 app.post('/create-checkout-session', async (_req, res) => {
   try {
@@ -93,8 +98,10 @@ app.get('/__routes', (_req, res) => {
 });
 
 const PORT = process.env.PORT || 8080;
-app.listen(PORT, () => {
-  console.log(`🚀 FOREAS backend listening on ${PORT}`);
+const HOST = '0.0.0.0'; // Railway requires binding to 0.0.0.0
+
+app.listen(Number(PORT), HOST, () => {
+  console.log(`🚀 FOREAS backend listening on ${HOST}:${PORT}`);
   console.log(`🔐 OTP Endpoints:`);
   console.log(`   POST /api/auth/send-otp`);
   console.log(`   POST /api/auth/verify-otp`);
