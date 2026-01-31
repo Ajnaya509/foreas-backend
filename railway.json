@@ -8,6 +8,7 @@
     "startCommand": "node dist/index.js",
     "restartPolicyType": "ALWAYS",
     "healthcheckPath": "/health",
-    "healthcheckTimeout": 120
+    "healthcheckTimeout": 90,
+    "numReplicas": 1
   }
 }
