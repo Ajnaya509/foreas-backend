@@ -14,19 +14,36 @@
  */
 
 import { Router, Request, Response } from 'express';
-import {
-  normalizePhone,
-  isValidFrenchMobile,
-  generateSecureOTP,
-  hashOTP,
-  isValidOTPFormat,
-  checkRateLimit,
-  logConsentEvent,
-  upsertMarketingContact,
-  supabaseAdmin,
-} from '../helpers/index';
 
 const router = Router();
+
+// Lazy load helpers to avoid startup delay
+let helpersLoaded = false;
+let normalizePhone: any;
+let isValidFrenchMobile: any;
+let generateSecureOTP: any;
+let hashOTP: any;
+let isValidOTPFormat: any;
+let checkRateLimit: any;
+let logConsentEvent: any;
+let upsertMarketingContact: any;
+let supabaseAdmin: any;
+
+async function loadHelpers() {
+  if (helpersLoaded) return;
+  const helpers = await import('../helpers/index.js');
+  normalizePhone = helpers.normalizePhone;
+  isValidFrenchMobile = helpers.isValidFrenchMobile;
+  generateSecureOTP = helpers.generateSecureOTP;
+  hashOTP = helpers.hashOTP;
+  isValidOTPFormat = helpers.isValidOTPFormat;
+  checkRateLimit = helpers.checkRateLimit;
+  logConsentEvent = helpers.logConsentEvent;
+  upsertMarketingContact = helpers.upsertMarketingContact;
+  supabaseAdmin = helpers.supabaseAdmin;
+  helpersLoaded = true;
+  console.log('[OTP] Helpers loaded');
+}
 
 // Bird API configuration
 const BIRD_API_KEY = process.env.BIRD_API_KEY || process.env.CLÉ_API_BIRD || process.env.MESSAGEBIRD_API_KEY;
@@ -57,18 +74,13 @@ interface FinalizeSignupRequest {
 
 /**
  * POST /api/auth/send-otp
- *
- * 1. Valide le numéro
- * 2. Vérifie le rate-limit
- * 3. Génère OTP sécurisé (code, salt, hash)
- * 4. Crée session en base (hash + salt, PAS le code)
- * 5. Envoie SMS via Bird API
- * 6. Retourne sessionToken au client
  */
 router.post('/send-otp', async (req: Request, res: Response) => {
   const startTime = Date.now();
 
   try {
+    await loadHelpers();
+
     const { phone, signupData } = req.body as SendOTPRequest;
     const ip = req.ip || req.headers['x-forwarded-for']?.toString() || 'unknown';
     const userAgent = req.headers['user-agent'] || 'unknown';
@@ -220,17 +232,12 @@ router.post('/send-otp', async (req: Request, res: Response) => {
 
 /**
  * POST /api/auth/verify-otp
- *
- * 1. Récupère la session via sessionToken
- * 2. Récupère le salt de la session
- * 3. Hash le code entré avec le salt + pepper
- * 4. Compare avec le hash stocké
- * 5. Marque la session comme vérifiée ou incrémente les tentatives
  */
 router.post('/verify-otp', async (req: Request, res: Response) => {
   try {
+    await loadHelpers();
+
     const { sessionToken, code } = req.body as VerifyOTPRequest;
-    const ip = req.ip || req.headers['x-forwarded-for']?.toString() || 'unknown';
 
     // === VALIDATION ===
     if (!sessionToken || !code) {
@@ -285,11 +292,9 @@ router.post('/verify-otp', async (req: Request, res: Response) => {
     const verifyResult = Array.isArray(result) ? result[0] : result;
 
     if (verifyResult.success) {
-      // === SUCCÈS ===
       console.log(`[OTP] ✅ Code verified for session ${sessionToken.substring(0, 8)}...`);
 
-      // Logger l'événement
-      await logConsentEvent(session.phone, 'phone_verified', { ip });
+      await logConsentEvent(session.phone, 'phone_verified', { ip: req.ip });
 
       return res.json({
         success: true,
@@ -298,7 +303,6 @@ router.post('/verify-otp', async (req: Request, res: Response) => {
       });
     }
 
-    // === ÉCHEC ===
     console.log(`[OTP] ❌ Invalid code for session ${sessionToken.substring(0, 8)}... (${verifyResult.error_code})`);
 
     return res.status(400).json({
@@ -320,12 +324,11 @@ router.post('/verify-otp', async (req: Request, res: Response) => {
 
 /**
  * POST /api/auth/finalize-signup
- *
- * Appelé APRÈS verify-otp avec succès.
- * Crée le compte utilisateur Supabase Auth + contact marketing.
  */
 router.post('/finalize-signup', async (req: Request, res: Response) => {
   try {
+    await loadHelpers();
+
     const { sessionToken, password } = req.body as FinalizeSignupRequest;
     const ip = req.ip || req.headers['x-forwarded-for']?.toString() || 'unknown';
 
@@ -382,7 +385,7 @@ router.post('/finalize-signup', async (req: Request, res: Response) => {
       email: signupData.email,
       password: password,
       phone: session.phone,
-      email_confirm: true, // Email confirmé car téléphone vérifié
+      email_confirm: true,
       phone_confirm: true,
       user_metadata: {
         first_name: signupData.firstName,
@@ -394,7 +397,6 @@ router.post('/finalize-signup', async (req: Request, res: Response) => {
     if (authError) {
       console.error('[OTP] ❌ Auth user creation failed:', authError);
 
-      // Gérer les erreurs courantes
       if (authError.message.includes('already registered')) {
         return res.status(409).json({
           success: false,
@@ -428,7 +430,6 @@ router.post('/finalize-signup', async (req: Request, res: Response) => {
 
     if (driverError) {
       console.error('[OTP] ⚠️ Driver profile creation failed:', driverError);
-      // On continue, le profil sera créé plus tard si besoin
     }
 
     // === CONTACT MARKETING ===
@@ -475,7 +476,6 @@ router.post('/finalize-signup', async (req: Request, res: Response) => {
 
 /**
  * GET /api/auth/otp/status
- * Status du service OTP
  */
 router.get('/otp/status', (req: Request, res: Response) => {
   res.json({
