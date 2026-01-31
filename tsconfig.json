@@ -10,5 +10,23 @@
     "skipLibCheck": true,
     "resolveJsonModule": true
   },
-  "include": ["src/**/*"]
+  "include": [
+    "src/index.ts",
+    "src/helpers/**/*",
+    "src/routes/**/*"
+  ],
+  "exclude": [
+    "src/__tests__",
+    "src/app",
+    "src/lib",
+    "src/server",
+    "src/tests",
+    "src/webhooks",
+    "src/services",
+    "src/middleware",
+    "src/utils",
+    "src/config",
+    "src/demo",
+    "src/env.ts"
+  ]
 }
