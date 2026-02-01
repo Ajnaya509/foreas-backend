@@ -30,14 +30,11 @@ const HOST = '0.0.0.0';
 // ============================================
 // HEALTH CHECK - PRIORITÉ ABSOLUE
 // Répond IMMÉDIATEMENT, AVANT tout import lourd
+// Railway healthcheck attend 200 + body non-vide
 // ============================================
 app.get('/health', (_req, res) => {
-  res.status(200).json({
-    status: 'ok',
-    version: VERSION,
-    sha: GIT_SHA.substring(0, 7),
-    uptime_ms: Date.now() - START_TIME,
-  });
+  // Texte simple pour Railway healthcheck (pas JSON)
+  res.status(200).send(`OK v${VERSION} sha:${GIT_SHA.substring(0, 7)}`);
 });
 
 app.get('/version', (_req, res) => {
@@ -46,6 +43,7 @@ app.get('/version', (_req, res) => {
     sha: GIT_SHA,
     env: process.env.NODE_ENV || 'production',
     node: process.version,
+    uptime_ms: Date.now() - START_TIME,
   });
 });
 

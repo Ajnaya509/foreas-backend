@@ -27,6 +27,7 @@
     "src/utils",
     "src/config",
     "src/demo",
-    "src/env.ts"
+    "src/env.ts",
+    "src/routes/ajnaya.ts"
   ]
 }
