@@ -7,7 +7,10 @@
     "build": "tsc",
     "start": "node dist/index.js",
     "dev": "npx tsx src/index.ts",
-    "smoke": "bash scripts/smoke-test.sh"
+    "typecheck": "tsc --noEmit",
+    "smoke": "bash scripts/smoke-test.sh",
+    "smoke:prod": "bash scripts/smoke-prod.sh",
+    "redeploy:loop": "bash scripts/redeploy-loop.sh"
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.38.4",
@@ -27,6 +30,6 @@
     "typescript": "^5.3.0"
   },
   "engines": {
-    "node": ">=20.0.0"
+    "node": ">=22 <23"
   }
 }
