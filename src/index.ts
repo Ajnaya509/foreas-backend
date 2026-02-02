@@ -44,6 +44,11 @@ app.get('/version', (_req, res) => {
     env: process.env.NODE_ENV || 'production',
     node: process.version,
     uptime_ms: Date.now() - START_TIME,
+    modules: {
+      data_platform: 'v1',
+      ai_service: 'v1',
+      rbac: 'v1',
+    },
   });
 });
 
@@ -135,9 +140,42 @@ async function loadOtpRoutes(): Promise<void> {
   }
 }
 
-// Charger OTP routes immédiatement après listen
-// mais APRÈS que le serveur soit prêt
-setTimeout(() => loadOtpRoutes(), 0);
+// ============================================
+// AI & ADMIN ROUTES - LAZY LOADED
+// ============================================
+let aiRoutesLoaded = false;
+let adminRoutesLoaded = false;
+
+async function loadAIRoutes(): Promise<void> {
+  if (aiRoutesLoaded) return;
+  try {
+    const { aiRouter } = await import('./routes/ai.routes.js');
+    app.use('/api/ai', aiRouter);
+    aiRoutesLoaded = true;
+    console.log('[AI] Routes mounted at /api/ai');
+  } catch (err: any) {
+    console.error(`[AI] Failed to load: ${err.message}`);
+  }
+}
+
+async function loadAdminRoutes(): Promise<void> {
+  if (adminRoutesLoaded) return;
+  try {
+    const { adminRouter } = await import('./routes/admin.routes.js');
+    app.use('/api/admin', adminRouter);
+    adminRoutesLoaded = true;
+    console.log('[Admin] Routes mounted at /api/admin');
+  } catch (err: any) {
+    console.error(`[Admin] Failed to load: ${err.message}`);
+  }
+}
+
+// Charger toutes les routes après le serveur prêt
+setTimeout(() => {
+  loadOtpRoutes();
+  loadAIRoutes();
+  loadAdminRoutes();
+}, 0);
 
 // ============================================
 // STRIPE CHECKOUT
