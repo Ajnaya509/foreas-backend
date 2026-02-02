@@ -141,10 +141,11 @@ async function loadOtpRoutes(): Promise<void> {
 }
 
 // ============================================
-// AI & ADMIN ROUTES - LAZY LOADED
+// AI & ADMIN & ANALYTICS ROUTES - LAZY LOADED
 // ============================================
 let aiRoutesLoaded = false;
 let adminRoutesLoaded = false;
+let analyticsRoutesLoaded = false;
 
 async function loadAIRoutes(): Promise<void> {
   if (aiRoutesLoaded) return;
@@ -170,11 +171,26 @@ async function loadAdminRoutes(): Promise<void> {
   }
 }
 
+async function loadAnalyticsRoutes(): Promise<void> {
+  if (analyticsRoutesLoaded) return;
+  try {
+    const { analyticsRouter } = await import('./routes/analytics.routes.js');
+    app.use('/api/analytics', analyticsRouter);
+    // Alias for compatibility
+    app.use('/api/events', analyticsRouter);
+    analyticsRoutesLoaded = true;
+    console.log('[Analytics] Routes mounted at /api/analytics + /api/events');
+  } catch (err: any) {
+    console.error(`[Analytics] Failed to load: ${err.message}`);
+  }
+}
+
 // Charger toutes les routes après le serveur prêt
 setTimeout(() => {
   loadOtpRoutes();
   loadAIRoutes();
   loadAdminRoutes();
+  loadAnalyticsRoutes();
 }, 0);
 
 // ============================================

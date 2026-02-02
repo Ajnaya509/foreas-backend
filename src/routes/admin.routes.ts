@@ -498,4 +498,119 @@ router.get(
   }
 );
 
+// ============================================
+// BACKGROUND JOBS (Admin only)
+// ============================================
+
+/**
+ * POST /api/admin/jobs/features
+ * Trigger daily features computation
+ */
+router.post(
+  '/jobs/features',
+  requireAdmin,
+  async (req: AuthenticatedRequest, res: Response) => {
+    try {
+      const { runDailyFeaturesJob } = await import('../jobs/dailyFeatures.js');
+
+      // Run job in background
+      runDailyFeaturesJob()
+        .then(result => {
+          console.log('[Admin] Daily features job completed:', result);
+        })
+        .catch(err => {
+          console.error('[Admin] Daily features job failed:', err);
+        });
+
+      logAuditAsync({
+        actorId: req.userId!,
+        actorRole: 'admin',
+        action: 'job.triggered',
+        targetType: 'job',
+        targetId: 'daily_features',
+        details: { triggered_by: 'admin_api' },
+      });
+
+      res.json({
+        success: true,
+        message: 'Daily features job started',
+        job: 'daily_features',
+      });
+    } catch (err: any) {
+      console.error('[Admin Routes] Trigger features job error:', err);
+      res.status(500).json({ error: 'Failed to trigger job' });
+    }
+  }
+);
+
+/**
+ * POST /api/admin/jobs/outcomes-timeout
+ * Trigger outcomes timeout job
+ */
+router.post(
+  '/jobs/outcomes-timeout',
+  requireAdmin,
+  async (req: AuthenticatedRequest, res: Response) => {
+    try {
+      const { runOutcomesTimeoutJob } = await import('../jobs/outcomesTimeout.js');
+
+      // Run job in background
+      runOutcomesTimeoutJob()
+        .then(result => {
+          console.log('[Admin] Outcomes timeout job completed:', result);
+        })
+        .catch(err => {
+          console.error('[Admin] Outcomes timeout job failed:', err);
+        });
+
+      logAuditAsync({
+        actorId: req.userId!,
+        actorRole: 'admin',
+        action: 'job.triggered',
+        targetType: 'job',
+        targetId: 'outcomes_timeout',
+        details: { triggered_by: 'admin_api' },
+      });
+
+      res.json({
+        success: true,
+        message: 'Outcomes timeout job started',
+        job: 'outcomes_timeout',
+      });
+    } catch (err: any) {
+      console.error('[Admin Routes] Trigger outcomes job error:', err);
+      res.status(500).json({ error: 'Failed to trigger job' });
+    }
+  }
+);
+
+/**
+ * GET /api/admin/jobs
+ * List available jobs
+ */
+router.get(
+  '/jobs',
+  requireAdmin,
+  async (_req: AuthenticatedRequest, res: Response) => {
+    res.json({
+      jobs: [
+        {
+          id: 'daily_features',
+          name: 'Daily Features Computation',
+          description: 'Computes driver features for all active drivers',
+          schedule: '04:00 UTC daily',
+          endpoint: 'POST /api/admin/jobs/features',
+        },
+        {
+          id: 'outcomes_timeout',
+          name: 'Outcomes Timeout',
+          description: 'Marks pending outcomes > 24h as ignored',
+          schedule: '05:00 UTC daily',
+          endpoint: 'POST /api/admin/jobs/outcomes-timeout',
+        },
+      ],
+    });
+  }
+);
+
 export { router as adminRouter };
