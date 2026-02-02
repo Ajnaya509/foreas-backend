@@ -1,0 +1,44 @@
+name: FOREAS Daily Jobs
+
+on:
+  schedule:
+    # Run daily features at 04:00 UTC
+    - cron: '0 4 * * *'
+    # Run outcomes timeout at 05:00 UTC
+    - cron: '0 5 * * *'
+  workflow_dispatch:
+    inputs:
+      job:
+        description: 'Job to run'
+        required: true
+        default: 'features'
+        type: choice
+        options:
+          - features
+          - outcomes
+          - both
+
+jobs:
+  daily-features:
+    if: github.event.schedule == '0 4 * * *' || (github.event_name == 'workflow_dispatch' && (github.event.inputs.job == 'features' || github.event.inputs.job == 'both'))
+    runs-on: ubuntu-latest
+    steps:
+      - name: Trigger Daily Features Job
+        run: |
+          curl -X POST "${{ secrets.BACKEND_URL }}/api/admin/jobs/features" \
+            -H "Authorization: Bearer ${{ secrets.ADMIN_JWT }}" \
+            -H "Content-Type: application/json"
+        env:
+          BACKEND_URL: https://foreas-stripe-backend-production.up.railway.app
+
+  outcomes-timeout:
+    if: github.event.schedule == '0 5 * * *' || (github.event_name == 'workflow_dispatch' && (github.event.inputs.job == 'outcomes' || github.event.inputs.job == 'both'))
+    runs-on: ubuntu-latest
+    steps:
+      - name: Trigger Outcomes Timeout Job
+        run: |
+          curl -X POST "${{ secrets.BACKEND_URL }}/api/admin/jobs/outcomes-timeout" \
+            -H "Authorization: Bearer ${{ secrets.ADMIN_JWT }}" \
+            -H "Content-Type: application/json"
+        env:
+          BACKEND_URL: https://foreas-stripe-backend-production.up.railway.app

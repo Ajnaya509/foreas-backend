@@ -10,7 +10,9 @@
     "typecheck": "tsc --noEmit",
     "smoke": "bash scripts/smoke-test.sh",
     "smoke:prod": "bash scripts/smoke-prod.sh",
-    "redeploy:loop": "bash scripts/redeploy-loop.sh"
+    "redeploy:loop": "bash scripts/redeploy-loop.sh",
+    "job:features": "node dist/jobs/runFeatures.js",
+    "job:outcomes": "node dist/jobs/runOutcomes.js"
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.38.4",
