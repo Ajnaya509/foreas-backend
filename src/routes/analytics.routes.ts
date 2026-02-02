@@ -429,4 +429,89 @@ router.get('/health', (_req: Request, res: Response) => {
   });
 });
 
+/**
+ * GET /api/analytics/debug/tables
+ * TEMPORARY: Debug endpoint to verify table existence and counts
+ * TODO: Remove after verification
+ */
+router.get('/debug/tables', async (_req: Request, res: Response) => {
+  try {
+    const { getSupabaseAdmin } = await import('../helpers/supabase.js');
+    const supabase = getSupabaseAdmin();
+
+    // Count events (last hour)
+    const { count: eventsLastHour } = await supabase
+      .from('events')
+      .select('id', { count: 'exact', head: true })
+      .gte('created_at', new Date(Date.now() - 3600000).toISOString());
+
+    // Count total events
+    const { count: eventsTotal } = await supabase
+      .from('events')
+      .select('id', { count: 'exact', head: true });
+
+    // Count driver_features
+    const { count: featuresTotal, error: featuresErr } = await supabase
+      .from('driver_features')
+      .select('id', { count: 'exact', head: true });
+
+    // Count ai_outcomes
+    const { count: outcomesTotal, error: outcomesErr } = await supabase
+      .from('ai_outcomes')
+      .select('id', { count: 'exact', head: true });
+
+    // Latest 3 events (no PII)
+    const { data: latestEvents } = await supabase
+      .from('events')
+      .select('id, event_name, session_id, created_at')
+      .order('created_at', { ascending: false })
+      .limit(3);
+
+    // Latest 3 features (no PII)
+    const { data: latestFeatures } = await supabase
+      .from('driver_features')
+      .select('id, snapshot_type, computed_at')
+      .order('computed_at', { ascending: false })
+      .limit(3);
+
+    // Latest 3 outcomes (no PII)
+    const { data: latestOutcomes } = await supabase
+      .from('ai_outcomes')
+      .select('id, outcome_type, created_at')
+      .order('created_at', { ascending: false })
+      .limit(3);
+
+    res.json({
+      status: 'ok',
+      tables: {
+        events: {
+          exists: eventsTotal !== null,
+          count_total: eventsTotal || 0,
+          count_last_hour: eventsLastHour || 0,
+          latest: latestEvents || [],
+        },
+        driver_features: {
+          exists: !featuresErr,
+          count: featuresTotal || 0,
+          error: featuresErr?.message || null,
+          latest: latestFeatures || [],
+        },
+        ai_outcomes: {
+          exists: !outcomesErr,
+          count: outcomesTotal || 0,
+          error: outcomesErr?.message || null,
+          latest: latestOutcomes || [],
+        },
+      },
+      timestamp: new Date().toISOString(),
+    });
+  } catch (err: any) {
+    res.status(500).json({
+      status: 'error',
+      error: err.message,
+      timestamp: new Date().toISOString(),
+    });
+  }
+});
+
 export { router as analyticsRouter };
