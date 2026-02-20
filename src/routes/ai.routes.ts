@@ -188,7 +188,7 @@ router.post('/tts', async (req: Request, res: Response) => {
   }
 
   try {
-    const proxyRes = await fetch(`${AI_BACKEND}/api/ajnaya/synthesize`, {
+    const proxyRes = await fetch(`${AI_BACKEND}/api/ajnaya/tts`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
