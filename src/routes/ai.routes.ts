@@ -67,24 +67,21 @@ router.post('/transcribe', upload.single('audio'), async (req: Request, res: Res
     let proxyRes: globalThis.Response;
 
     if (req.file) {
-      // Multipart: forward audio file as base64
-      const audioBase64 = req.file.buffer.toString('base64');
-      const mimeType = req.file.mimetype || 'audio/m4a';
+      // Forward audio as multipart (AI Backend uses multer upload.single('audio'))
+      const formData = new FormData();
+      const blob = new Blob([new Uint8Array(req.file.buffer)], { type: req.file.mimetype || 'audio/m4a' });
+      formData.append('audio', blob, req.file.originalname || 'audio.m4a');
+      formData.append('language', (req.body as any)?.language || 'fr');
 
       proxyRes = await fetch(`${AI_BACKEND}/api/ajnaya/transcribe`, {
         method: 'POST',
         headers: {
-          'Content-Type': 'application/json',
           'X-FOREAS-SERVICE-KEY': SERVICE_KEY,
         },
-        body: JSON.stringify({
-          audio: audioBase64,
-          mimeType,
-          language: (req.body as any)?.language || 'fr',
-        }),
+        body: formData,
       });
     } else {
-      // JSON body (base64 audio or other format)
+      // JSON body fallback
       proxyRes = await fetch(`${AI_BACKEND}/api/ajnaya/transcribe`, {
         method: 'POST',
         headers: {
@@ -94,7 +91,6 @@ router.post('/transcribe', upload.single('audio'), async (req: Request, res: Res
         body: JSON.stringify(req.body),
       });
     }
-
     const data = await proxyRes.json();
     console.log('[AI-PROXY] ✅ Transcribe response:', proxyRes.status);
     return res.status(proxyRes.status).json(data);
