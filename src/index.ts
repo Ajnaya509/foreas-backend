@@ -194,26 +194,142 @@ setTimeout(() => {
 }, 0);
 
 // ============================================
-// STRIPE CHECKOUT
+// STRIPE CHECKOUT — Anti-duplication chauffeur
 // ============================================
-app.post('/create-checkout-session', async (_req, res) => {
+app.use('/create-checkout-session', express.json());
+app.post('/create-checkout-session', async (req, res) => {
   try {
     const priceId = process.env.STRIPE_PRICE_ID;
     if (!priceId) {
       return res.status(400).json({ error: 'Missing STRIPE_PRICE_ID' });
     }
 
+    const { email, phone, driverId } = req.body as {
+      email?: string;
+      phone?: string;
+      driverId?: string;
+    };
+
+    if (!email) {
+      return res.status(400).json({ error: 'email requis pour créer un abonnement' });
+    }
+
     const stripe = await getStripe();
+
+    // ── 1. Chercher client existant par email ──────────────────────────
+    const existingCustomers = await stripe.customers.list({ email, limit: 5 });
+
+    let customerId: string | undefined;
+    let alreadySubscribed = false;
+
+    if (existingCustomers.data.length > 0) {
+      // Prendre le plus récent avec metadata.driver_id si dispo
+      const matched = driverId
+        ? existingCustomers.data.find(c => c.metadata?.driver_id === driverId)
+        : existingCustomers.data[0];
+
+      customerId = (matched ?? existingCustomers.data[0]).id;
+
+      // ── 2. Vérifier abonnement actif ──────────────────────────────
+      const subs = await stripe.subscriptions.list({
+        customer: customerId,
+        status: 'active',
+        limit: 1,
+      });
+
+      if (subs.data.length > 0) {
+        // Chauffeur déjà abonné — retourner portal au lieu d'un nouveau checkout
+        alreadySubscribed = true;
+        console.log(`[Checkout] Doublon bloqué — déjà abonné: ${email} (${customerId})`);
+
+        const portalSession = await stripe.billingPortal.sessions.create({
+          customer: customerId,
+          return_url: 'https://foreas.app/dashboard',
+        });
+
+        return res.json({
+          already_subscribed: true,
+          portal_url: portalSession.url,
+          message: 'Vous avez déjà un abonnement actif.',
+        });
+      }
+    }
+
+    // ── 3. Créer ou récupérer le customer Stripe ───────────────────
+    if (!customerId) {
+      const newCustomer = await stripe.customers.create({
+        email,
+        phone: phone ?? undefined,
+        metadata: {
+          driver_id: driverId ?? '',
+          source: 'foreas_app',
+          created_at: new Date().toISOString(),
+        },
+      });
+      customerId = newCustomer.id;
+      console.log(`[Checkout] Nouveau customer créé: ${customerId} (${email})`);
+    }
+
+    // ── 4. Créer la session checkout liée au customer ─────────────
     const session = await stripe.checkout.sessions.create({
       mode: 'subscription',
+      customer: customerId,
+      customer_update: { address: 'auto' },
       line_items: [{ price: priceId, quantity: 1 }],
-      success_url: 'https://foreas.app/success',
+      subscription_data: {
+        metadata: {
+          driver_id: driverId ?? '',
+          source: 'foreas_app',
+        },
+      },
+      // Empêche de changer d'email pendant le checkout
+      customer_email: !customerId ? email : undefined,
+      allow_promotion_codes: true,
+      success_url: 'https://foreas.app/success?session_id={CHECKOUT_SESSION_ID}',
       cancel_url: 'https://foreas.app/cancel',
     });
 
-    res.json({ url: session.url });
+    console.log(`[Checkout] Session créée: ${session.id} pour ${email}`);
+    res.json({ url: session.url, session_id: session.id });
+
   } catch (e: any) {
     console.error(`[Checkout] Error: ${e.message}`);
+    res.status(400).json({ error: e.message });
+  }
+});
+
+// ── Vérifier le statut d'abonnement par email ─────────────────────────────
+app.post('/subscription/check', express.json(), async (req, res) => {
+  try {
+    const { email, driverId } = req.body as { email?: string; driverId?: string };
+    if (!email) return res.status(400).json({ error: 'email requis' });
+
+    const stripe = await getStripe();
+    const customers = await stripe.customers.list({ email, limit: 5 });
+
+    if (customers.data.length === 0) {
+      return res.json({ subscribed: false, customer_exists: false });
+    }
+
+    const customerId = driverId
+      ? (customers.data.find(c => c.metadata?.driver_id === driverId) ?? customers.data[0]).id
+      : customers.data[0].id;
+
+    const subs = await stripe.subscriptions.list({
+      customer: customerId,
+      status: 'active',
+      limit: 1,
+    });
+
+    const sub = subs.data[0] ?? null;
+    return res.json({
+      subscribed: !!sub,
+      customer_exists: true,
+      customer_id: customerId,
+      subscription_id: sub?.id ?? null,
+      current_period_end: sub ? new Date(sub.current_period_end * 1000).toISOString() : null,
+    });
+  } catch (e: any) {
     res.status(400).json({ error: e.message });
   }
 });
