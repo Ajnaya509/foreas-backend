@@ -171,46 +171,74 @@ router.post('/chat', async (req: AuthenticatedRequest, res: Response) => {
   }
 });
 
+// ── ElevenLabs Direct Config ──
+const ELEVENLABS_API_KEY = process.env.ELEVENLABS_API_KEY;
+const ELEVENLABS_VOICE_ID = process.env.ELEVENLABS_VOICE_ID || 'Xb7hH8MSUJpSbSDYk0k2'; // Ajnaya voice
+const ELEVENLABS_MODEL = 'eleven_multilingual_v2';
+
+if (!ELEVENLABS_API_KEY) {
+  console.warn('[TTS] ⚠️ ELEVENLABS_API_KEY manquante — TTS indisponible');
+} else {
+  console.log('[TTS] ✅ ElevenLabs configuré, voix:', ELEVENLABS_VOICE_ID);
+}
+
 /**
  * POST /api/ai/tts
- * Proxy vers AI Backend ElevenLabs TTS
+ * Appel direct ElevenLabs TTS (plus de proxy vers AI Backend)
+ * Body: { text: string, voice_id?: string }
  * Retourne audio/mpeg
  */
 router.post('/tts', async (req: Request, res: Response) => {
-  console.log('[AI-PROXY] 📨 /tts request');
+  const { text, voice_id } = req.body;
 
-  if (!SERVICE_KEY) {
-    return res.status(500).json({ error: 'AI proxy not configured', message: 'FOREAS_SERVICE_KEY missing' });
+  if (!text || typeof text !== 'string') {
+    return res.status(400).json({ error: 'missing_text', message: 'Le champ "text" est requis.' });
   }
 
+  if (!ELEVENLABS_API_KEY) {
+    return res.status(500).json({ error: 'tts_not_configured', message: 'ELEVENLABS_API_KEY non configurée.' });
+  }
+
+  const voiceId = voice_id || ELEVENLABS_VOICE_ID;
+  console.log(`[TTS] 📨 Synthèse ElevenLabs: "${text.substring(0, 60)}..." voix=${voiceId}`);
+
   try {
-    const proxyRes = await fetch(`${AI_BACKEND}/api/ajnaya/tts`, {
+    const elevenRes = await fetch(`https://api.elevenlabs.io/v1/text-to-speech/${voiceId}`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        'X-FOREAS-SERVICE-KEY': SERVICE_KEY,
+        'xi-api-key': ELEVENLABS_API_KEY,
+        'Accept': 'audio/mpeg',
       },
-      body: JSON.stringify(req.body),
+      body: JSON.stringify({
+        text,
+        model_id: ELEVENLABS_MODEL,
+        voice_settings: {
+          stability: 0.65,
+          similarity_boost: 0.75,
+          style: 0.35,
+          use_speaker_boost: true,
+        },
+      }),
     });
 
-    if (!proxyRes.ok) {
-      try {
-        const errorData = await proxyRes.json();
-        return res.status(proxyRes.status).json(errorData);
-      } catch {
-        const errorText = await proxyRes.text();
-        return res.status(proxyRes.status).json({ error: errorText });
-      }
+    if (!elevenRes.ok) {
+      const errorText = await elevenRes.text().catch(() => 'Unknown error');
+      console.error(`[TTS] ❌ ElevenLabs ${elevenRes.status}:`, errorText);
+      return res.status(502).json({
+        error: 'tts_upstream_error',
+        message: `ElevenLabs error: ${elevenRes.status}`,
+        details: errorText.substring(0, 200),
+      });
     }
 
-    // Stream audio back
-    const buffer = await proxyRes.arrayBuffer();
-    console.log('[AI-PROXY] ✅ TTS audio size:', buffer.byteLength);
+    const buffer = await elevenRes.arrayBuffer();
+    console.log(`[TTS] ✅ Audio généré: ${buffer.byteLength} bytes`);
     res.set('Content-Type', 'audio/mpeg');
     return res.status(200).send(Buffer.from(buffer));
   } catch (err: any) {
-    console.error('[AI-PROXY] ❌ TTS error:', err.message);
-    return res.status(500).json({ error: 'AI proxy error', message: err.message });
+    console.error('[TTS] ❌ Erreur:', err.message);
+    return res.status(500).json({ error: 'tts_error', message: err.message });
   }
 });
 
