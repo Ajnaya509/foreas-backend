@@ -497,7 +497,7 @@ function generateSlug(name: string): string {
   return `${base}-${suffix}`;
 }
 
-// ── Helper : générer la bio Ajnaya ───────────────────────────
+// ── Helper : générer la bio Ajnaya (PAS Framework) ───────────
 function generateBio(
   name: string,
   city: string,
@@ -505,11 +505,33 @@ function generateBio(
   trips: number,
   languages: string[],
 ): string {
-  const langStr = languages.join(', ');
-  return `Chauffeur professionnel à ${city}, ${name} assure des trajets confortables et ponctuels. Noté ${rating}/5 sur ${trips} courses, il parle ${langStr}. Réservez votre prochain trajet ou laissez-lui un pourboire pour le remercier.`;
+  const firstName = name.split(' ')[0];
+  const langStr = languages.length > 1 ? languages.join(', ') : '';
+  const tripsText =
+    trips > 50
+      ? `${trips}+ courses réalisées`
+      : trips > 0
+        ? `${trips} courses`
+        : 'nouveau sur FOREAS';
+  const ratingText =
+    rating >= 4.5 ? `noté ${rating.toFixed(1)}/5 par ses passagers` : `note ${rating.toFixed(1)}/5`;
+
+  // 3 templates PAS (Problem-Agitate-Solution) — variation déterministe
+  const variant = name.length % 3;
+
+  if (variant === 0) {
+    // Template A: Urgence + fiabilité
+    return `Besoin d'un trajet fiable à ${city} ? ${firstName} est chauffeur VTC professionnel, ${ratingText} avec ${tripsText}. Ponctualité, confort et discrétion garantis.${langStr ? ` Parle ${langStr}.` : ''} Réservez en 30 secondes, sans application à télécharger.`;
+  } else if (variant === 1) {
+    // Template B: Confiance + expérience
+    return `Vous cherchez un chauffeur de confiance à ${city} ? ${firstName}, ${ratingText}, assure vos trajets avec professionnalisme et ponctualité. ${tripsText} et des passagers satisfaits.${langStr ? ` Langues : ${langStr}.` : ''} Réservez directement — réponse rapide garantie.`;
+  } else {
+    // Template C: Simplicité + résultat
+    return `${firstName}, chauffeur VTC à ${city}. ${tripsText}, ${ratingText}. Véhicule propre, trajet sans stress, arrivée à l'heure.${langStr ? ` ${langStr}.` : ''} Réservez votre course en quelques clics — c'est simple, rapide et gratuit.`;
+  }
 }
 
-// ── Page HTML publique passager (/c/:slug) — SEO COMPLET ─────
+// ── Page HTML publique passager (/c/:slug) — CRO OPTIMISÉ ────
 function renderDriverPage(site: any, source: string): string {
   const rating = site.rating || 5;
   const stars = '★'.repeat(Math.round(rating)) + '☆'.repeat(5 - Math.round(rating));
@@ -518,15 +540,14 @@ function renderDriverPage(site: any, source: string): string {
   const siteUrl = `${backendUrl}/c/${site.slug}`;
   const themeColor = site.theme_color || '#8C52FF';
   const displayName = site.display_name || 'Chauffeur';
+  const firstName = displayName.split(' ')[0];
   const city = site.city || 'France';
   const vehicleType = site.vehicle_type || 'Chauffeur VTC';
   const totalTrips = site.total_trips || 0;
   const totalTipCount = site.total_tip_count || 0;
-  const viewCount = site.view_count || 0;
   const languages = site.languages || ['Français'];
   const bio = site.bio || generateBio(displayName, city, rating, totalTrips, languages);
   const metaDescription = bio.substring(0, 155).replace(/"/g, '&quot;');
-  const nicheLabel = site.niche_label || '';
   const pricing = site.pricing || null;
 
   // JSON-LD structured data
@@ -594,13 +615,16 @@ function renderDriverPage(site: any, source: string): string {
     if (entries.length > 0) {
       pricingHtml = `
 <div class="card">
-  <div class="section-title">💰 Tarifs indicatifs</div>
+  <div class="section-title">Tarifs indicatifs</div>
   <div class="pricing-grid">
     ${entries.map(([label, price]) => `<div class="pricing-item"><span class="pricing-label">${label}</span><span class="pricing-price">${price}€</span></div>`).join('')}
   </div>
 </div>`;
     }
   }
+
+  // Trust badges
+  const tripsLabel = totalTrips > 100 ? `${totalTrips}+` : totalTrips > 0 ? `${totalTrips}` : '—';
 
   return `<!DOCTYPE html>
 <html lang="fr" prefix="og: https://ogp.me/ns#">
@@ -652,91 +676,233 @@ ${site.photo_url ? `<meta name="twitter:image" content="${site.photo_url}">` : '
   :root{--c-primary:${themeColor};--c-bg:#0a0a0f;--c-card:#111118;--c-border:rgba(255,255,255,0.07);--c-text:#fff;--c-muted:#aaa;--c-subtle:#ccc;--radius:20px;--font:'Inter',-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif}
   *{margin:0;padding:0;box-sizing:border-box}
   body{background:var(--c-bg);color:var(--c-text);font-family:var(--font);min-height:100vh;-webkit-font-smoothing:antialiased}
-  .wrap{max-width:480px;margin:0 auto}
-  .hero{background:linear-gradient(160deg,#0d0d1a 0%,#1a0d2e 50%,#0d0d1a 100%);padding:48px 20px 32px;text-align:center;position:relative;overflow:hidden}
+  .wrap{max-width:480px;margin:0 auto;padding-bottom:80px}
+
+  /* ── HERO (compact, CTA above fold) ── */
+  .hero{background:linear-gradient(160deg,#0d0d1a 0%,#1a0d2e 50%,#0d0d1a 100%);padding:36px 20px 28px;text-align:center;position:relative;overflow:hidden}
   .hero::before{content:'';position:absolute;inset:0;background:radial-gradient(circle at 50% 0%,var(--c-primary)22 0%,transparent 70%)}
-  .avatar{width:110px;height:110px;border-radius:50%;object-fit:cover;border:3px solid var(--c-primary);margin:0 auto 16px;display:block;background:#1a1a2e;position:relative}
-  .avatar-placeholder{width:110px;height:110px;border-radius:50%;background:linear-gradient(135deg,var(--c-primary),#4a90e2);margin:0 auto 16px;display:flex;align-items:center;justify-content:center;font-size:40px;font-weight:800;color:#fff;position:relative}
-  h1{font-size:28px;font-weight:800;margin-bottom:6px;position:relative;letter-spacing:-0.3px}
-  .vehicle{color:var(--c-muted);font-size:14px;margin-bottom:10px;position:relative}
-  .niche-badge{display:inline-block;background:var(--c-primary)22;border:1px solid var(--c-primary)44;color:var(--c-primary);border-radius:20px;padding:4px 14px;font-size:12px;font-weight:600;margin-bottom:12px;position:relative}
-  .stars{color:#FFD700;font-size:22px;margin-bottom:4px;position:relative;letter-spacing:2px}
+  .avatar{width:100px;height:100px;border-radius:50%;object-fit:cover;border:3px solid var(--c-primary);margin:0 auto 12px;display:block;background:#1a1a2e;position:relative}
+  .avatar-placeholder{width:100px;height:100px;border-radius:50%;background:linear-gradient(135deg,var(--c-primary),#4a90e2);margin:0 auto 12px;display:flex;align-items:center;justify-content:center;font-size:36px;font-weight:800;color:#fff;position:relative}
+  h1{font-size:26px;font-weight:800;margin-bottom:4px;position:relative;letter-spacing:-0.3px}
+  .vehicle{color:var(--c-muted);font-size:14px;margin-bottom:8px;position:relative}
+  .stars{color:#FFD700;font-size:20px;margin-bottom:2px;position:relative;letter-spacing:2px}
   .rating-text{color:var(--c-muted);font-size:13px;margin-bottom:16px;position:relative}
-  .langs{display:inline-flex;gap:8px;flex-wrap:wrap;justify-content:center;position:relative}
-  .lang-tag{background:rgba(255,255,255,0.08);border:1px solid rgba(255,255,255,0.12);border-radius:20px;padding:5px 14px;font-size:12px;color:var(--c-subtle);font-weight:500}
-  .stats-row{display:grid;grid-template-columns:repeat(3,1fr);gap:1px;background:var(--c-border);margin:0 16px;border-radius:var(--radius);overflow:hidden}
-  .stat{background:var(--c-card);padding:16px 8px;text-align:center}
-  .stat-val{font-size:22px;font-weight:800;color:var(--c-text)}
-  .stat-label{font-size:11px;color:var(--c-muted);margin-top:4px;text-transform:uppercase;letter-spacing:0.5px}
+
+  /* ── PRIMARY CTA (above fold) ── */
+  .hero-cta{display:block;width:calc(100% - 16px);margin:0 auto;background:linear-gradient(135deg,var(--c-primary),#4a90e2);border:none;border-radius:16px;padding:18px;font-size:17px;font-weight:700;color:#fff;cursor:pointer;transition:all .2s;text-align:center;text-decoration:none;font-family:var(--font);min-height:56px;position:relative;letter-spacing:0.2px}
+  .hero-cta:hover{opacity:.92;transform:scale(1.01)}
+  .hero-cta:active{transform:scale(0.98)}
+
+  /* ── TRUST BADGES ── */
+  .trust-row{display:flex;gap:8px;justify-content:center;padding:16px 16px 0}
+  .trust-badge{flex:1;background:var(--c-card);border:1px solid var(--c-border);border-radius:14px;padding:14px 8px;text-align:center}
+  .trust-icon{font-size:20px;margin-bottom:4px}
+  .trust-val{font-size:16px;font-weight:700;color:var(--c-text)}
+  .trust-label{font-size:10px;color:var(--c-muted);text-transform:uppercase;letter-spacing:0.5px;margin-top:2px}
+
+  /* ── BOOKING MODULE ── */
+  .booking{background:var(--c-card);border:1px solid var(--c-border);border-radius:var(--radius);margin:16px;padding:22px;position:relative}
+  .booking-title{font-size:18px;font-weight:700;color:var(--c-text);margin-bottom:4px}
+  .booking-sub{font-size:13px;color:var(--c-muted);margin-bottom:18px}
+  .booking-progress{display:flex;gap:6px;margin-bottom:20px}
+  .booking-step-dot{flex:1;height:4px;border-radius:2px;background:rgba(255,255,255,0.1);transition:background .3s}
+  .booking-step-dot.active{background:var(--c-primary)}
+  .booking-step{display:none}
+  .booking-step.visible{display:block}
+  .field-label{font-size:12px;font-weight:600;color:var(--c-muted);text-transform:uppercase;letter-spacing:0.5px;margin-bottom:6px}
+  .field-row{display:flex;gap:10px}
+  .field-row > *{flex:1}
+  .field-group{margin-bottom:14px}
+  .b-input{width:100%;background:#1a1a2e;border:1px solid rgba(255,255,255,0.12);border-radius:12px;padding:14px;font-size:15px;color:#fff;font-family:var(--font);min-height:48px;transition:border-color .2s}
+  .b-input:focus{outline:none;border-color:var(--c-primary)}
+  .b-input::placeholder{color:#555}
+  select.b-input{appearance:none;background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12'%3E%3Cpath fill='%23888' d='M6 8L1 3h10z'/%3E%3C/svg%3E");background-repeat:no-repeat;background-position:right 14px center;padding-right:36px}
+  select.b-input option{background:#1a1a2e;color:#fff}
+  .booking-next{width:100%;background:linear-gradient(135deg,var(--c-primary),#4a90e2);border:none;border-radius:14px;padding:16px;font-size:16px;font-weight:700;color:#fff;cursor:pointer;transition:all .2s;font-family:var(--font);min-height:52px;margin-top:4px}
+  .booking-next:hover{opacity:.92}
+  .booking-next:active{transform:scale(0.98)}
+  .booking-next:disabled{opacity:.5;cursor:not-allowed}
+  .booking-back{background:none;border:none;color:var(--c-muted);font-size:13px;cursor:pointer;padding:10px;margin-top:8px;font-family:var(--font);text-decoration:underline}
+  .booking-confirm{background:#0d2b1a;border:1px solid #2ecc71;border-radius:16px;padding:20px;text-align:center;display:none}
+  .booking-confirm h3{color:#2ecc71;font-size:18px;margin-bottom:6px}
+  .booking-confirm p{color:var(--c-muted);font-size:14px}
+  .required-star{color:#e74c3c;margin-left:2px}
+
+  /* ── CARD / BIO ── */
   .card{background:var(--c-card);border:1px solid var(--c-border);border-radius:var(--radius);margin:16px;padding:22px}
   .bio{color:var(--c-subtle);font-size:15px;line-height:1.7}
   .section-title{font-size:13px;font-weight:600;color:var(--c-primary);text-transform:uppercase;letter-spacing:1px;margin-bottom:14px}
+
+  /* ── PRICING ── */
   .pricing-grid{display:grid;grid-template-columns:1fr 1fr;gap:10px}
   .pricing-item{background:rgba(255,255,255,0.04);border:1px solid var(--c-border);border-radius:12px;padding:14px;display:flex;flex-direction:column;align-items:center;gap:4px}
   .pricing-label{font-size:12px;color:var(--c-muted);text-transform:uppercase;letter-spacing:0.5px}
   .pricing-price{font-size:20px;font-weight:700;color:var(--c-primary)}
-  .book-btn{display:block;width:calc(100% - 32px);margin:16px auto;background:linear-gradient(135deg,var(--c-primary),#4a90e2);border:none;border-radius:16px;padding:18px;font-size:17px;font-weight:700;color:#fff;cursor:pointer;transition:opacity .2s;text-align:center;text-decoration:none;font-family:var(--font)}
-  .book-btn:hover{opacity:.9}
+
+  /* ── SECONDARY CTA ── */
+  .cta-secondary{display:block;width:calc(100% - 32px);margin:8px auto 16px;background:transparent;border:2px solid var(--c-primary);border-radius:16px;padding:16px;font-size:16px;font-weight:700;color:var(--c-primary);cursor:pointer;transition:all .2s;text-align:center;text-decoration:none;font-family:var(--font);min-height:52px}
+  .cta-secondary:hover{background:var(--c-primary);color:#fff}
+  .cta-sub{display:block;text-align:center;font-size:12px;color:var(--c-muted);margin-bottom:16px}
+
+  /* ── TIP ── */
   .tip-amounts{display:grid;grid-template-columns:repeat(4,1fr);gap:8px;margin-bottom:14px}
-  .tip-btn{background:#1a1a2e;border:2px solid rgba(255,255,255,0.1);border-radius:12px;padding:12px 0;text-align:center;font-size:16px;font-weight:700;color:#fff;cursor:pointer;transition:all .2s}
+  .tip-btn{background:#1a1a2e;border:2px solid rgba(255,255,255,0.1);border-radius:12px;padding:12px 0;text-align:center;font-size:16px;font-weight:700;color:#fff;cursor:pointer;transition:all .2s;min-height:48px}
   .tip-btn.selected,.tip-btn:hover{border-color:var(--c-primary);background:var(--c-primary)22;color:var(--c-primary)}
-  .pay-btn{width:100%;background:linear-gradient(135deg,var(--c-primary),#4a90e2);border:none;border-radius:16px;padding:18px;font-size:17px;font-weight:700;color:#fff;cursor:pointer;transition:opacity .2s;font-family:var(--font)}
+  .pay-btn{width:100%;background:linear-gradient(135deg,var(--c-primary),#4a90e2);border:none;border-radius:16px;padding:18px;font-size:17px;font-weight:700;color:#fff;cursor:pointer;transition:opacity .2s;font-family:var(--font);min-height:56px}
   .pay-btn:hover{opacity:.9}
   .pay-btn:disabled{opacity:.5;cursor:not-allowed}
+
+  /* ── REVIEW ── */
   .review-stars{display:flex;gap:10px;justify-content:center;margin-bottom:16px}
   .review-star{font-size:34px;cursor:pointer;color:#333;transition:color .15s}
   .review-star.lit{color:#FFD700}
   textarea{width:100%;background:#1a1a2e;border:1px solid rgba(255,255,255,0.12);border-radius:12px;padding:14px;font-size:15px;color:#fff;resize:none;min-height:90px;margin-bottom:12px;font-family:var(--font)}
-  input[type=text],input[type=email]{width:100%;background:#1a1a2e;border:1px solid rgba(255,255,255,0.12);border-radius:12px;padding:14px;font-size:15px;color:#fff;margin-bottom:10px;font-family:var(--font)}
-  .submit-btn{width:100%;background:#1a1a2e;border:2px solid var(--c-primary);border-radius:16px;padding:16px;font-size:16px;font-weight:700;color:var(--c-primary);cursor:pointer;transition:all .2s;font-family:var(--font)}
+  input[type=text],input[type=email],input[type=tel],input[type=date],input[type=time]{width:100%;background:#1a1a2e;border:1px solid rgba(255,255,255,0.12);border-radius:12px;padding:14px;font-size:15px;color:#fff;margin-bottom:10px;font-family:var(--font);min-height:48px}
+  .submit-btn{width:100%;background:#1a1a2e;border:2px solid var(--c-primary);border-radius:16px;padding:16px;font-size:16px;font-weight:700;color:var(--c-primary);cursor:pointer;transition:all .2s;font-family:var(--font);min-height:52px}
   .submit-btn:hover{background:var(--c-primary);color:#fff}
+
+  /* ── FOOTER ── */
   .foreas-badge{text-align:center;padding:32px 16px 48px;color:#444;font-size:12px}
   .foreas-badge a{color:var(--c-primary);text-decoration:none;font-weight:600}
   .foreas-badge .legal{margin-top:8px;font-size:10px;color:#333}
+
+  /* ── MESSAGES ── */
   .success-msg{background:#0d2b1a;border:1px solid #2ecc71;border-radius:12px;padding:16px;color:#2ecc71;text-align:center;margin-top:12px;display:none}
   .error-msg{background:#2b0d0d;border:1px solid #e74c3c;border-radius:12px;padding:16px;color:#e74c3c;text-align:center;margin-top:12px;display:none}
   .stripe-secure{font-size:12px;color:#555;text-align:center;margin-top:8px}
-  @media(max-width:400px){.tip-amounts{grid-template-columns:repeat(2,1fr)}.pricing-grid{grid-template-columns:1fr}}
+
+  /* ── STICKY BAR ── */
+  .sticky-bar{position:fixed;bottom:0;left:0;right:0;z-index:999;transform:translateY(100%);transition:transform .3s ease;background:linear-gradient(0deg,var(--c-bg) 0%,rgba(10,10,15,0.97) 100%);border-top:1px solid var(--c-border);padding:12px 16px;display:flex;align-items:center;justify-content:center}
+  .sticky-bar.visible{transform:translateY(0)}
+  .sticky-bar-btn{width:100%;max-width:480px;background:linear-gradient(135deg,var(--c-primary),#4a90e2);border:none;border-radius:14px;padding:16px;font-size:16px;font-weight:700;color:#fff;cursor:pointer;font-family:var(--font);min-height:52px;transition:all .2s}
+  .sticky-bar-btn:hover{opacity:.92}
+  .sticky-bar-btn:active{transform:scale(0.98)}
+
+  @media(max-width:400px){.tip-amounts{grid-template-columns:repeat(2,1fr)}.pricing-grid{grid-template-columns:1fr}.field-row{flex-direction:column;gap:0}}
 </style>
 </head>
 <body>
 <div class="wrap">
 
-<!-- HERO -->
+<!-- ═══ 1. HERO COMPACT (Attention — above fold) ═══ -->
 <header class="hero">
   ${
     site.photo_url
-      ? `<img class="avatar" src="${site.photo_url}" alt="Photo de ${displayName}, ${vehicleType} ${city}" width="110" height="110">`
+      ? `<img class="avatar" src="${site.photo_url}" alt="Photo de ${displayName}, ${vehicleType} ${city}" width="100" height="100">`
       : `<div class="avatar-placeholder">${displayName[0].toUpperCase()}</div>`
   }
   <h1>${displayName}</h1>
   <div class="vehicle">${vehicleType} · ${city}</div>
-  ${nicheLabel ? `<div class="niche-badge">${nicheLabel}</div>` : ''}
   <div class="stars" aria-label="Note ${rating.toFixed(1)} sur 5">${stars}</div>
-  <div class="rating-text">${rating.toFixed(1)}/5 · ${totalTipCount} avis passagers</div>
-  <div class="langs">${languages.map((l: string) => `<span class="lang-tag">${l}</span>`).join('')}</div>
+  <div class="rating-text">${rating.toFixed(1)}/5 · ${totalTipCount > 0 ? totalTipCount + ' avis' : 'Nouveau sur FOREAS'}</div>
+  <button class="hero-cta" id="heroCTA" onclick="document.getElementById('bookingSection').scrollIntoView({behavior:'smooth'})">
+    Réserver ${firstName} maintenant
+  </button>
 </header>
 
-<!-- STATS -->
-<div class="stats-row">
-  <div class="stat"><div class="stat-val">${totalTrips}</div><div class="stat-label">Trajets</div></div>
-  <div class="stat"><div class="stat-val">${rating.toFixed(1)}</div><div class="stat-label">Note</div></div>
-  <div class="stat"><div class="stat-val">${viewCount}</div><div class="stat-label">Vues</div></div>
+<!-- ═══ 2. TRUST BADGES (Desire) ═══ -->
+<div class="trust-row">
+  <div class="trust-badge">
+    <div class="trust-icon">✅</div>
+    <div class="trust-val">Vérifié</div>
+    <div class="trust-label">Profil</div>
+  </div>
+  <div class="trust-badge">
+    <div class="trust-icon">🚗</div>
+    <div class="trust-val">${tripsLabel}</div>
+    <div class="trust-label">Courses</div>
+  </div>
+  <div class="trust-badge">
+    <div class="trust-icon">⭐</div>
+    <div class="trust-val">${rating.toFixed(1)}</div>
+    <div class="trust-label">Note</div>
+  </div>
 </div>
 
-<!-- BIO -->
+<!-- ═══ 3. BOOKING MODULE — 2 ÉTAPES (Action) ═══ -->
+<div class="booking" id="bookingSection">
+  <div class="booking-title">Réserver votre trajet</div>
+  <div class="booking-sub">Gratuit, sans engagement · Réponse rapide</div>
+
+  <!-- Progress dots -->
+  <div class="booking-progress">
+    <div class="booking-step-dot active" id="dot1"></div>
+    <div class="booking-step-dot" id="dot2"></div>
+  </div>
+
+  <!-- STEP 1: Trajet -->
+  <div class="booking-step visible" id="step1">
+    <div class="field-group">
+      <div class="field-label">Type de service</div>
+      <select class="b-input" id="bService">
+        <option value="transfer">Transfert / Trajet</option>
+        <option value="airport">Aéroport</option>
+        <option value="hourly">Mise à disposition</option>
+        <option value="event">Événement</option>
+      </select>
+    </div>
+    <div class="field-group">
+      <div class="field-label">Adresse de prise en charge</div>
+      <input type="text" class="b-input" id="bAddress" placeholder="Ex: 10 rue de Rivoli, Paris">
+    </div>
+    <div class="field-row">
+      <div class="field-group">
+        <div class="field-label">Date</div>
+        <input type="date" class="b-input" id="bDate">
+      </div>
+      <div class="field-group">
+        <div class="field-label">Heure</div>
+        <input type="time" class="b-input" id="bTime">
+      </div>
+    </div>
+    <button class="booking-next" onclick="goStep2()">Continuer →</button>
+  </div>
+
+  <!-- STEP 2: Coordonnées -->
+  <div class="booking-step" id="step2">
+    <div class="field-group">
+      <div class="field-label">Votre nom<span class="required-star">*</span></div>
+      <input type="text" class="b-input" id="bName" placeholder="Prénom Nom" required>
+    </div>
+    <div class="field-group">
+      <div class="field-label">Téléphone<span class="required-star">*</span></div>
+      <input type="tel" class="b-input" id="bPhone" placeholder="06 12 34 56 78" required>
+    </div>
+    <div class="field-group">
+      <div class="field-label">Email (optionnel)</div>
+      <input type="email" class="b-input" id="bEmail" placeholder="votre@email.com">
+    </div>
+    <div class="field-group">
+      <div class="field-label">Notes (optionnel)</div>
+      <input type="text" class="b-input" id="bNotes" placeholder="Nombre de bagages, destination...">
+    </div>
+    <button class="booking-next" id="bookSubmitBtn" onclick="submitBooking()">Confirmer la réservation</button>
+    <button class="booking-back" onclick="goStep1()">← Modifier le trajet</button>
+  </div>
+
+  <!-- Confirmation -->
+  <div class="booking-confirm" id="bookingConfirm">
+    <h3>Réservation envoyée !</h3>
+    <p>${firstName} vous recontactera très rapidement pour confirmer votre trajet.</p>
+  </div>
+  <div class="error-msg" id="bookingError"></div>
+</div>
+
+<!-- ═══ 4. BIO (Interest — PAS Framework) ═══ -->
 <div class="card">
   <div class="bio">${bio}</div>
 </div>
 
+<!-- ═══ 5. TARIFS ═══ -->
 ${pricingHtml}
 
-<!-- CTA BOOKING -->
-<a href="https://wa.me/?text=${encodeURIComponent(`Bonjour ${displayName}, je souhaite réserver un trajet via votre page FOREAS.`)}" class="book-btn" target="_blank" rel="noopener">
-  📱 Contacter ${displayName}
-</a>
+<!-- ═══ 6. CTA SECONDAIRE ═══ -->
+<button class="cta-secondary" onclick="document.getElementById('bookingSection').scrollIntoView({behavior:'smooth'})">
+  Réserver ${firstName} maintenant
+</button>
+<span class="cta-sub">Gratuit · Sans application · Réponse rapide</span>
 
-<!-- POURBOIRE -->
+<!-- ═══ 7. POURBOIRE ═══ -->
 <div class="card">
   <div class="section-title">💳 Laisser un pourboire</div>
   <div class="tip-amounts">
@@ -753,7 +919,7 @@ ${pricingHtml}
   <div class="error-msg" id="tipError"></div>
 </div>
 
-<!-- AVIS -->
+<!-- ═══ 8. AVIS ═══ -->
 <div class="card">
   <div class="section-title">⭐ Laisser un avis</div>
   <div class="review-stars">
@@ -770,23 +936,107 @@ ${pricingHtml}
   <div class="error-msg" id="reviewError"></div>
 </div>
 
-<!-- FOOTER -->
+<!-- ═══ 9. FOOTER ═══ -->
 <footer class="foreas-badge">
   Site propulsé par <a href="https://foreas.app" target="_blank" rel="noopener">FOREAS</a> · Copilote IA pour chauffeurs VTC<br>
-  <div class="legal">© ${new Date().getFullYear()} FOREAS Labs · CGU · Confidentialité</div>
+  <div class="legal">&copy; ${new Date().getFullYear()} FOREAS Labs &middot; CGU &middot; Confidentialit&eacute;</div>
 </footer>
 
 </div><!-- /wrap -->
 
+<!-- ═══ 10. STICKY BOTTOM BAR ═══ -->
+<div class="sticky-bar" id="stickyBar">
+  <button class="sticky-bar-btn" onclick="document.getElementById('bookingSection').scrollIntoView({behavior:'smooth'})">
+    Réserver ${firstName} →
+  </button>
+</div>
+
 <script>
-  const BACKEND = '${backendUrl}';
-  const SLUG = '${site.slug}';
-  let selectedAmount = 0;
-  let selectedRating = 0;
+  var BACKEND = '${backendUrl}';
+  var SLUG = '${site.slug}';
+  var selectedAmount = 0;
+  var selectedRating = 0;
 
   // Track view
   fetch(BACKEND + '/api/driver-site/view/' + SLUG, {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({source:'${source}'})}).catch(function(){});
 
+  // ── BOOKING 2-STEP ──
+  function goStep2() {
+    document.getElementById('step1').classList.remove('visible');
+    document.getElementById('step2').classList.add('visible');
+    document.getElementById('dot1').classList.remove('active');
+    document.getElementById('dot2').classList.add('active');
+    document.getElementById('step2').scrollIntoView({behavior:'smooth',block:'nearest'});
+  }
+
+  function goStep1() {
+    document.getElementById('step2').classList.remove('visible');
+    document.getElementById('step1').classList.add('visible');
+    document.getElementById('dot2').classList.remove('active');
+    document.getElementById('dot1').classList.add('active');
+  }
+
+  function submitBooking() {
+    var name = document.getElementById('bName').value.trim();
+    var phone = document.getElementById('bPhone').value.trim();
+    if (!name || !phone) {
+      alert('Nom et téléphone sont obligatoires');
+      return;
+    }
+    var btn = document.getElementById('bookSubmitBtn');
+    btn.disabled = true;
+    btn.textContent = 'Envoi en cours...';
+    document.getElementById('bookingError').style.display = 'none';
+
+    fetch(BACKEND + '/api/driver-site/booking', {
+      method: 'POST',
+      headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({
+        slug: SLUG,
+        service_type: document.getElementById('bService').value,
+        pickup_address: document.getElementById('bAddress').value,
+        booking_date: document.getElementById('bDate').value,
+        booking_time: document.getElementById('bTime').value,
+        passenger_name: name,
+        passenger_phone: phone,
+        passenger_email: document.getElementById('bEmail').value,
+        notes: document.getElementById('bNotes').value,
+        source: '${source}'
+      })
+    }).then(function(r){return r.json()}).then(function(data) {
+      if (data.success) {
+        document.getElementById('step2').classList.remove('visible');
+        document.querySelector('.booking-progress').style.display = 'none';
+        document.querySelector('.booking-sub').style.display = 'none';
+        document.getElementById('bookingConfirm').style.display = 'block';
+      } else {
+        throw new Error(data.error || 'Erreur');
+      }
+    }).catch(function(e) {
+      document.getElementById('bookingError').textContent = 'Erreur: ' + e.message;
+      document.getElementById('bookingError').style.display = 'block';
+      btn.disabled = false;
+      btn.textContent = 'Confirmer la réservation';
+    });
+  }
+
+  // ── STICKY BAR (IntersectionObserver) ──
+  var stickyBar = document.getElementById('stickyBar');
+  var heroCTA = document.getElementById('heroCTA');
+  if (heroCTA && stickyBar && 'IntersectionObserver' in window) {
+    var observer = new IntersectionObserver(function(entries) {
+      entries.forEach(function(entry) {
+        if (entry.isIntersecting) {
+          stickyBar.classList.remove('visible');
+        } else {
+          stickyBar.classList.add('visible');
+        }
+      });
+    }, {threshold: 0});
+    observer.observe(heroCTA);
+  }
+
+  // ── TIP (preserved) ──
   function selectTip(amount) {
     document.querySelectorAll('.tip-btn').forEach(function(b){b.classList.remove('selected')});
     document.getElementById('customTip').style.display = amount === 0 ? 'block' : 'none';
@@ -834,6 +1084,7 @@ ${pricingHtml}
     });
   }
 
+  // ── REVIEW (preserved) ──
   function setRating(n) {
     selectedRating = n;
     document.querySelectorAll('.review-star').forEach(function(s,i) {
@@ -1082,6 +1333,71 @@ app.post('/api/driver-site/review', async (req: any, res: any) => {
       .eq('id', site.id);
     return res.json({ success: true });
   } catch (err: any) {
+    return res.status(500).json({ error: err.message });
+  }
+});
+
+// ── POST /api/driver-site/booking — Réservation passager (2 étapes) ──
+app.post('/api/driver-site/booking', async (req: any, res: any) => {
+  const {
+    slug,
+    service_type,
+    pickup_address,
+    booking_date,
+    booking_time,
+    passenger_name,
+    passenger_phone,
+    passenger_email,
+    notes,
+    source,
+  } = req.body || {};
+
+  if (!slug || !passenger_name || !passenger_phone) {
+    return res.status(400).json({ error: 'slug + nom + téléphone requis' });
+  }
+
+  try {
+    const supa = await getSupabaseAdmin();
+    const { data: site } = await supa
+      .from('driver_sites')
+      .select('id,display_name')
+      .eq('slug', slug)
+      .eq('is_active', true)
+      .single();
+
+    if (!site) return res.status(404).json({ error: 'Site introuvable' });
+
+    const { data, error } = await supa
+      .from('driver_bookings')
+      .insert({
+        driver_site_id: site.id,
+        slug,
+        service_type: service_type || 'transfer',
+        pickup_address: pickup_address || null,
+        booking_date: booking_date || null,
+        booking_time: booking_time || null,
+        passenger_name,
+        passenger_phone,
+        passenger_email: passenger_email || null,
+        notes: notes || null,
+        source: source || 'web',
+      })
+      .select()
+      .single();
+
+    if (error) throw new Error(error.message);
+
+    // Track interaction
+    await supa.from('driver_site_interactions').insert({
+      driver_site_id: site.id,
+      interaction_type: 'booking',
+      passenger_name,
+      scan_source: source || 'web',
+    });
+
+    return res.json({ success: true, booking_id: data.id });
+  } catch (err: any) {
+    console.error('[DriverSite] booking error:', err.message);
     return res.status(500).json({ error: err.message });
   }
 });
