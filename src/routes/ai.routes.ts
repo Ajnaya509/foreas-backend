@@ -1,20 +1,11 @@
 /**
  * FOREAS Data Platform V1 - AI API Routes
  * ========================================
- * Endpoints for AI services + Ajnaya Voice Proxy.
- *
- * Architecture:
- *   App Mobile (JWT optionnel) → Stripe Backend (/api/ai/*) → AI Backend
- *   Toutes les clés API restent côté serveur.
+ * Endpoints for AI services.
  */
 
-import { Router, Request, Response } from 'express';
-import multer from 'multer';
-import {
-  processAIRequest,
-  getQuickRecommendation,
-  completeConversation,
-} from '../ai/aiService';
+import { Router, Response } from 'express';
+import { processAIRequest, getQuickRecommendation, completeConversation } from '../ai/aiService';
 import { getDriverContext, refreshDriverFeatures } from '../data/featureStore';
 import { getDriverOutcomes, getOutcomeStats, addOutcomeFeedback } from '../data/outcomes';
 import { getDriverConversations, getDriverConversationStats } from '../data/conversationLog';
@@ -28,219 +19,49 @@ import {
 import { trackEventAsync } from '../data/eventStore';
 
 const router = Router();
-const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 25 * 1024 * 1024 } });
 
-// ============================================
-// AI BACKEND PROXY CONFIG
-// ============================================
-const AI_BACKEND = process.env.AI_BACKEND_URL || 'https://foreas-ai-backend-production.up.railway.app';
-const SERVICE_KEY = process.env.FOREAS_SERVICE_KEY;
-
-if (!SERVICE_KEY) {
-  console.error('[AI-PROXY] ❌ FOREAS_SERVICE_KEY manquante — les routes Ajnaya proxy ne fonctionneront pas');
-} else {
-  console.log('[AI-PROXY] ✅ Service key configurée, proxy actif vers', AI_BACKEND);
-}
-
-// Apply authentication to all routes (SOFT: ne rejette pas si pas de token)
+// Apply authentication to all routes
 router.use(authenticateUser);
 
 // ============================================
-// AJNAYA VOICE PROXY ROUTES
-// Pas de requireAuth → fonctionne avec ou sans JWT
-// Les clés API (OpenAI, ElevenLabs) restent sur le AI Backend
+// AI COMPLETION ENDPOINTS
 // ============================================
 
 /**
- * POST /api/ai/transcribe
- * Proxy vers AI Backend Whisper STT
- * Accepte: multipart/form-data (audio file) ou JSON (base64 audio)
- */
-router.post('/transcribe', upload.single('audio'), async (req: Request, res: Response) => {
-  console.log('[AI-PROXY] 📨 /transcribe request');
-
-  if (!SERVICE_KEY) {
-    return res.status(500).json({ error: 'AI proxy not configured', message: 'FOREAS_SERVICE_KEY missing' });
-  }
-
-  try {
-    let proxyRes: globalThis.Response;
-
-    if (req.file) {
-      // Forward audio as multipart (AI Backend uses multer upload.single('audio'))
-      const formData = new FormData();
-      const blob = new Blob([new Uint8Array(req.file.buffer)], { type: req.file.mimetype || 'audio/m4a' });
-      formData.append('audio', blob, req.file.originalname || 'audio.m4a');
-      formData.append('language', (req.body as any)?.language || 'fr');
-
-      proxyRes = await fetch(`${AI_BACKEND}/api/ajnaya/transcribe`, {
-        method: 'POST',
-        headers: {
-          'X-FOREAS-SERVICE-KEY': SERVICE_KEY,
-        },
-        body: formData,
-      });
-    } else {
-      // JSON body fallback
-      proxyRes = await fetch(`${AI_BACKEND}/api/ajnaya/transcribe`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'X-FOREAS-SERVICE-KEY': SERVICE_KEY,
-        },
-        body: JSON.stringify(req.body),
-      });
-    }
-    const data = await proxyRes.json();
-    console.log('[AI-PROXY] ✅ Transcribe response:', proxyRes.status);
-    return res.status(proxyRes.status).json(data);
-  } catch (err: any) {
-    console.error('[AI-PROXY] ❌ Transcribe error:', err.message);
-    return res.status(500).json({ error: 'AI proxy error', message: err.message });
-  }
-});
-
-/**
  * POST /api/ai/chat
- * Smart routing:
- *   - Si body contient "text" → proxy Ajnaya (voice chat simplifié)
- *   - Si body contient "message" + auth → Data Platform AI (full pipeline)
+ * Main AI chat endpoint
  */
-router.post('/chat', async (req: AuthenticatedRequest, res: Response) => {
-  const { text, message } = req.body;
-
-  // ── Ajnaya Voice Chat Proxy (champ "text") ──
-  if (text && typeof text === 'string') {
-    console.log('[AI-PROXY] 📨 /chat (Ajnaya proxy) text:', text.substring(0, 50));
-
-    if (!SERVICE_KEY) {
-      return res.status(500).json({ error: 'AI proxy not configured' });
-    }
-
+router.post(
+  '/chat',
+  requireAuth,
+  requireConsent('ai_personalization'),
+  async (req: AuthenticatedRequest, res: Response) => {
     try {
-      const proxyRes = await fetch(`${AI_BACKEND}/api/ajnaya/chat`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'X-FOREAS-SERVICE-KEY': SERVICE_KEY,
-        },
-        body: JSON.stringify({
-          text,
-          context: req.body.context || {},
-          history: req.body.history || [],
-          driverId: req.userId || undefined,
-        }),
+      const { message, conversationId, contextType, sessionId, useRAG, temperature, model } =
+        req.body;
+
+      if (!message || typeof message !== 'string') {
+        return res.status(400).json({ error: 'Message is required' });
+      }
+
+      const result = await processAIRequest({
+        driverId: req.userId!,
+        message,
+        conversationId,
+        contextType,
+        sessionId: sessionId || req.sessionId,
+        useRAG,
+        temperature,
+        model,
       });
 
-      const data = await proxyRes.json();
-      console.log('[AI-PROXY] ✅ Chat response:', proxyRes.status);
-      return res.status(proxyRes.status).json(data);
+      res.json(result);
     } catch (err: any) {
-      console.error('[AI-PROXY] ❌ Chat proxy error:', err.message);
-      return res.status(500).json({ error: 'AI proxy error', message: err.message });
+      console.error('[AI Routes] Chat error:', err);
+      res.status(500).json({ error: 'AI service error', details: err.message });
     }
-  }
-
-  // ── Data Platform AI (champ "message" + auth requise) ──
-  if (!req.userId) {
-    return res.status(401).json({ error: 'Authentication required for Data Platform AI' });
-  }
-
-  try {
-    if (!message || typeof message !== 'string') {
-      return res.status(400).json({ error: 'Message or text is required' });
-    }
-
-    const { conversationId, contextType, sessionId, useRAG, temperature, model } = req.body;
-
-    const result = await processAIRequest({
-      driverId: req.userId!,
-      message,
-      conversationId,
-      contextType,
-      sessionId: sessionId || req.sessionId,
-      useRAG,
-      temperature,
-      model,
-    });
-
-    res.json(result);
-  } catch (err: any) {
-    console.error('[AI Routes] Chat error:', err);
-    res.status(500).json({ error: 'AI service error', details: err.message });
-  }
-});
-
-// ── ElevenLabs Direct Config ──
-const ELEVENLABS_API_KEY = process.env.ELEVENLABS_API_KEY;
-const ELEVENLABS_VOICE_ID = process.env.ELEVENLABS_VOICE_ID || 'Xb7hH8MSUJpSbSDYk0k2'; // Ajnaya voice
-const ELEVENLABS_MODEL = 'eleven_multilingual_v2';
-
-if (!ELEVENLABS_API_KEY) {
-  console.warn('[TTS] ⚠️ ELEVENLABS_API_KEY manquante — TTS indisponible');
-} else {
-  console.log('[TTS] ✅ ElevenLabs configuré, voix:', ELEVENLABS_VOICE_ID);
-}
-
-/**
- * POST /api/ai/tts
- * Appel direct ElevenLabs TTS (plus de proxy vers AI Backend)
- * Body: { text: string, voice_id?: string }
- * Retourne audio/mpeg
- */
-router.post('/tts', async (req: Request, res: Response) => {
-  const { text, voice_id } = req.body;
-
-  if (!text || typeof text !== 'string') {
-    return res.status(400).json({ error: 'missing_text', message: 'Le champ "text" est requis.' });
-  }
-
-  if (!ELEVENLABS_API_KEY) {
-    return res.status(500).json({ error: 'tts_not_configured', message: 'ELEVENLABS_API_KEY non configurée.' });
-  }
-
-  const voiceId = voice_id || ELEVENLABS_VOICE_ID;
-  console.log(`[TTS] 📨 Synthèse ElevenLabs: "${text.substring(0, 60)}..." voix=${voiceId}`);
-
-  try {
-    const elevenRes = await fetch(`https://api.elevenlabs.io/v1/text-to-speech/${voiceId}`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'xi-api-key': ELEVENLABS_API_KEY,
-        'Accept': 'audio/mpeg',
-      },
-      body: JSON.stringify({
-        text,
-        model_id: ELEVENLABS_MODEL,
-        voice_settings: {
-          stability: 0.65,
-          similarity_boost: 0.75,
-          style: 0.35,
-          use_speaker_boost: true,
-        },
-      }),
-    });
-
-    if (!elevenRes.ok) {
-      const errorText = await elevenRes.text().catch(() => 'Unknown error');
-      console.error(`[TTS] ❌ ElevenLabs ${elevenRes.status}:`, errorText);
-      return res.status(502).json({
-        error: 'tts_upstream_error',
-        message: `ElevenLabs error: ${elevenRes.status}`,
-        details: errorText.substring(0, 200),
-      });
-    }
-
-    const buffer = await elevenRes.arrayBuffer();
-    console.log(`[TTS] ✅ Audio généré: ${buffer.byteLength} bytes`);
-    res.set('Content-Type', 'audio/mpeg');
-    return res.status(200).send(Buffer.from(buffer));
-  } catch (err: any) {
-    console.error('[TTS] ❌ Erreur:', err.message);
-    return res.status(500).json({ error: 'tts_error', message: err.message });
-  }
-});
+  },
+);
 
 /**
  * POST /api/ai/quick
@@ -286,7 +107,7 @@ router.post(
       console.error('[AI Routes] Complete conversation error:', err);
       res.status(500).json({ error: 'Failed to complete conversation' });
     }
-  }
+  },
 );
 
 // ============================================
@@ -311,29 +132,25 @@ router.get('/context', requireAuth, async (req: AuthenticatedRequest, res: Respo
  * POST /api/ai/context/refresh
  * Force refresh driver features
  */
-router.post(
-  '/context/refresh',
-  requireAuth,
-  async (req: AuthenticatedRequest, res: Response) => {
-    try {
-      const { snapshotType } = req.body;
-      const snapshot = await refreshDriverFeatures(req.userId!, snapshotType || 'manual');
+router.post('/context/refresh', requireAuth, async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const { snapshotType } = req.body;
+    const snapshot = await refreshDriverFeatures(req.userId!, snapshotType || 'manual');
 
-      trackEventAsync({
-        eventName: 'features.refreshed',
-        eventCategory: 'recommendation',
-        actorId: req.userId,
-        actorRole: 'driver',
-        payload: { snapshot_type: snapshotType || 'manual' },
-      });
+    trackEventAsync({
+      eventName: 'features.refreshed',
+      eventCategory: 'recommendation',
+      actorId: req.userId,
+      actorRole: 'driver',
+      payload: { snapshot_type: snapshotType || 'manual' },
+    });
 
-      res.json(snapshot);
-    } catch (err: any) {
-      console.error('[AI Routes] Refresh context error:', err);
-      res.status(500).json({ error: 'Failed to refresh context' });
-    }
+    res.json(snapshot);
+  } catch (err: any) {
+    console.error('[AI Routes] Refresh context error:', err);
+    res.status(500).json({ error: 'Failed to refresh context' });
   }
-);
+});
 
 // ============================================
 // CONVERSATION HISTORY
@@ -343,25 +160,21 @@ router.post(
  * GET /api/ai/conversations
  * Get current driver's conversations
  */
-router.get(
-  '/conversations',
-  requireAuth,
-  async (req: AuthenticatedRequest, res: Response) => {
-    try {
-      const { limit, status } = req.query;
+router.get('/conversations', requireAuth, async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const { limit, status } = req.query;
 
-      const conversations = await getDriverConversations(req.userId!, {
-        limit: limit ? parseInt(limit as string, 10) : 20,
-        status: status as any,
-      });
+    const conversations = await getDriverConversations(req.userId!, {
+      limit: limit ? parseInt(limit as string, 10) : 20,
+      status: status as any,
+    });
 
-      res.json(conversations);
-    } catch (err: any) {
-      console.error('[AI Routes] Get conversations error:', err);
-      res.status(500).json({ error: 'Failed to get conversations' });
-    }
+    res.json(conversations);
+  } catch (err: any) {
+    console.error('[AI Routes] Get conversations error:', err);
+    res.status(500).json({ error: 'Failed to get conversations' });
   }
-);
+});
 
 /**
  * GET /api/ai/conversations/stats
@@ -378,7 +191,7 @@ router.get(
       console.error('[AI Routes] Get conversation stats error:', err);
       res.status(500).json({ error: 'Failed to get stats' });
     }
-  }
+  },
 );
 
 // ============================================
@@ -394,7 +207,7 @@ router.get('/outcomes', requireAuth, async (req: AuthenticatedRequest, res: Resp
     const { limit } = req.query;
     const outcomes = await getDriverOutcomes(
       req.userId!,
-      limit ? parseInt(limit as string, 10) : 20
+      limit ? parseInt(limit as string, 10) : 20,
     );
     res.json(outcomes);
   } catch (err: any) {
@@ -407,19 +220,15 @@ router.get('/outcomes', requireAuth, async (req: AuthenticatedRequest, res: Resp
  * GET /api/ai/outcomes/stats
  * Get outcome statistics
  */
-router.get(
-  '/outcomes/stats',
-  requireAuth,
-  async (req: AuthenticatedRequest, res: Response) => {
-    try {
-      const stats = await getOutcomeStats(req.userId!);
-      res.json(stats);
-    } catch (err: any) {
-      console.error('[AI Routes] Get outcome stats error:', err);
-      res.status(500).json({ error: 'Failed to get stats' });
-    }
+router.get('/outcomes/stats', requireAuth, async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const stats = await getOutcomeStats(req.userId!);
+    res.json(stats);
+  } catch (err: any) {
+    console.error('[AI Routes] Get outcome stats error:', err);
+    res.status(500).json({ error: 'Failed to get stats' });
   }
-);
+});
 
 /**
  * POST /api/ai/outcomes/:id/feedback
@@ -454,8 +263,90 @@ router.post(
       console.error('[AI Routes] Add feedback error:', err);
       res.status(500).json({ error: 'Failed to add feedback' });
     }
-  }
+  },
 );
+
+// ============================================
+// TTS & TRANSCRIBE — Proxy vers AI Backend
+// ============================================
+
+const AI_BACKEND =
+  process.env.AI_BACKEND_URL || 'https://foreas-ai-backend-production.up.railway.app';
+const FOREAS_SERVICE_KEY = process.env.FOREAS_SERVICE_KEY;
+
+/**
+ * POST /api/ai/tts
+ * Proxy vers AI Backend /api/ajnaya/tts
+ * Retourne audio/mpeg binaire
+ */
+router.post('/tts', requireAuth, async (req: AuthenticatedRequest, res: Response) => {
+  if (!FOREAS_SERVICE_KEY) {
+    return res.status(503).json({ error: 'TTS not configured (missing service key)' });
+  }
+
+  try {
+    const response = await fetch(`${AI_BACKEND}/api/ajnaya/tts`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-FOREAS-SERVICE-KEY': FOREAS_SERVICE_KEY,
+      },
+      body: JSON.stringify(req.body),
+    });
+
+    if (!response.ok) {
+      try {
+        const errorData = await response.json();
+        console.error('[AI-TTS] AI Backend error:', response.status, errorData);
+        return res.status(response.status).json(errorData);
+      } catch {
+        const errorText = await response.text();
+        console.error('[AI-TTS] AI Backend error:', response.status, errorText);
+        return res.status(response.status).json({ error: errorText });
+      }
+    }
+
+    // TTS retourne audio/mpeg
+    const buffer = await response.arrayBuffer();
+    console.log(`[AI-TTS] ✅ Audio forwarded, size: ${buffer.byteLength}`);
+
+    res.set('Content-Type', 'audio/mpeg');
+    return res.status(200).send(Buffer.from(buffer));
+  } catch (err: any) {
+    console.error('[AI-TTS] Proxy error:', err.message);
+    return res.status(500).json({ error: 'TTS proxy error', message: err.message });
+  }
+});
+
+/**
+ * POST /api/ai/transcribe
+ * Proxy vers AI Backend /api/ajnaya/transcribe (Whisper)
+ */
+router.post('/transcribe', requireAuth, async (req: AuthenticatedRequest, res: Response) => {
+  if (!FOREAS_SERVICE_KEY) {
+    return res.status(503).json({ error: 'Transcription not configured' });
+  }
+
+  try {
+    const response = await fetch(`${AI_BACKEND}/api/ajnaya/transcribe`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-FOREAS-SERVICE-KEY': FOREAS_SERVICE_KEY,
+      },
+      body: JSON.stringify(req.body),
+    });
+
+    const data = await response.json();
+    if (!response.ok) {
+      console.error('[AI-Transcribe] AI Backend error:', response.status, data);
+    }
+    return res.status(response.status).json(data);
+  } catch (err: any) {
+    console.error('[AI-Transcribe] Proxy error:', err.message);
+    return res.status(500).json({ error: 'Transcription proxy error', message: err.message });
+  }
+});
 
 // ============================================
 // HEALTH CHECK
@@ -465,10 +356,21 @@ router.post(
  * GET /api/ai/health
  * AI service health check
  */
-router.get('/health', (_req, res) => {
+router.get('/health', async (_req, res) => {
+  // Also check AI Backend connectivity
+  let aiBackendStatus = 'unknown';
+  try {
+    const resp = await fetch(`${AI_BACKEND}/health`, { signal: AbortSignal.timeout(3000) });
+    aiBackendStatus = resp.ok ? 'ok' : `error_${resp.status}`;
+  } catch {
+    aiBackendStatus = 'unreachable';
+  }
+
   res.json({
     status: 'ok',
     service: 'ai',
+    aiBackend: aiBackendStatus,
+    serviceKeyConfigured: !!FOREAS_SERVICE_KEY,
     timestamp: new Date().toISOString(),
   });
 });
