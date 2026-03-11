@@ -509,82 +509,200 @@ function generateBio(
   return `Chauffeur professionnel à ${city}, ${name} assure des trajets confortables et ponctuels. Noté ${rating}/5 sur ${trips} courses, il parle ${langStr}. Réservez votre prochain trajet ou laissez-lui un pourboire pour le remercier.`;
 }
 
-// ── Page HTML publique passager (/c/:slug) ───────────────────
+// ── Page HTML publique passager (/c/:slug) — SEO COMPLET ─────
 function renderDriverPage(site: any, source: string): string {
-  const stars =
-    '★'.repeat(Math.round(site.rating || 5)) + '☆'.repeat(5 - Math.round(site.rating || 5));
-  const languages = (site.languages || ['Français']).join(' · ');
+  const rating = site.rating || 5;
+  const stars = '★'.repeat(Math.round(rating)) + '☆'.repeat(5 - Math.round(rating));
   const backendUrl =
     process.env.BACKEND_URL || 'https://foreas-stripe-backend-production.up.railway.app';
+  const siteUrl = `${backendUrl}/c/${site.slug}`;
   const themeColor = site.theme_color || '#8C52FF';
+  const displayName = site.display_name || 'Chauffeur';
+  const city = site.city || 'France';
+  const vehicleType = site.vehicle_type || 'Chauffeur VTC';
+  const totalTrips = site.total_trips || 0;
+  const totalTipCount = site.total_tip_count || 0;
+  const viewCount = site.view_count || 0;
+  const languages = site.languages || ['Français'];
+  const bio = site.bio || generateBio(displayName, city, rating, totalTrips, languages);
+  const metaDescription = bio.substring(0, 155).replace(/"/g, '&quot;');
+  const nicheLabel = site.niche_label || '';
+  const pricing = site.pricing || null;
+
+  // JSON-LD structured data
+  const jsonLd = {
+    '@context': 'https://schema.org',
+    '@type': 'LocalBusiness',
+    additionalType: 'https://schema.org/TaxiService',
+    name: `${displayName} — ${vehicleType}`,
+    description: bio.substring(0, 300),
+    url: siteUrl,
+    ...(site.photo_url ? { image: site.photo_url } : {}),
+    address: {
+      '@type': 'PostalAddress',
+      addressLocality: city,
+      addressCountry: 'FR',
+    },
+    ...(totalTipCount > 0
+      ? {
+          aggregateRating: {
+            '@type': 'AggregateRating',
+            ratingValue: rating.toFixed(1),
+            bestRating: '5',
+            ratingCount: String(totalTipCount),
+          },
+        }
+      : {}),
+    priceRange: '€€',
+    knowsLanguage: languages,
+  };
+
+  // Pricing grid HTML
+  let pricingHtml = '';
+  if (pricing && typeof pricing === 'object') {
+    const entries = Object.entries(pricing).filter(([, v]) => v && Number(v) > 0);
+    if (entries.length > 0) {
+      pricingHtml = `
+<div class="card">
+  <div class="section-title">💰 Tarifs indicatifs</div>
+  <div class="pricing-grid">
+    ${entries.map(([label, price]) => `<div class="pricing-item"><span class="pricing-label">${label}</span><span class="pricing-price">${price}€</span></div>`).join('')}
+  </div>
+</div>`;
+    }
+  }
 
   return `<!DOCTYPE html>
-<html lang="fr">
+<html lang="fr" prefix="og: https://ogp.me/ns#">
 <head>
 <meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>${site.display_name} — Chauffeur VTC</title>
-<meta name="description" content="${(site.bio || '').substring(0, 150)}">
-<meta property="og:title" content="${site.display_name} — Votre chauffeur">
-<meta property="og:image" content="${site.photo_url || ''}">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=5.0">
+<title>${displayName} — ${vehicleType} ${city} | FOREAS</title>
+
+<!-- SEO Meta -->
+<meta name="description" content="${metaDescription}">
+<meta name="robots" content="index, follow, max-image-preview:large">
+<link rel="canonical" href="${siteUrl}">
+<meta name="theme-color" content="${themeColor}">
+<meta name="author" content="${displayName}">
+
+<!-- Open Graph -->
+<meta property="og:type" content="profile">
+<meta property="og:title" content="${displayName} — ${vehicleType} ${city}">
+<meta property="og:description" content="${metaDescription}">
+<meta property="og:url" content="${siteUrl}">
+${
+  site.photo_url
+    ? `<meta property="og:image" content="${site.photo_url}">
+<meta property="og:image:width" content="400">
+<meta property="og:image:height" content="400">
+<meta property="og:image:alt" content="Photo de ${displayName}">`
+    : ''
+}
+<meta property="og:locale" content="fr_FR">
+<meta property="og:site_name" content="FOREAS">
+
+<!-- Twitter Card -->
+<meta name="twitter:card" content="${site.photo_url ? 'summary_large_image' : 'summary'}">
+<meta name="twitter:title" content="${displayName} — ${vehicleType}">
+<meta name="twitter:description" content="${metaDescription}">
+${site.photo_url ? `<meta name="twitter:image" content="${site.photo_url}">` : ''}
+
+<!-- JSON-LD Structured Data -->
+<script type="application/ld+json">${JSON.stringify(jsonLd)}</script>
+
+<!-- Google Fonts -->
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+
 <style>
+  :root{--c-primary:${themeColor};--c-bg:#0a0a0f;--c-card:#111118;--c-border:rgba(255,255,255,0.07);--c-text:#fff;--c-muted:#aaa;--c-subtle:#ccc;--radius:20px;--font:'Inter',-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif}
   *{margin:0;padding:0;box-sizing:border-box}
-  body{background:#0a0a0f;color:#fff;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;min-height:100vh}
-  .hero{background:linear-gradient(160deg,#0d0d1a 0%,#1a0d2e 50%,#0d0d1a 100%);padding:40px 20px 30px;text-align:center;position:relative;overflow:hidden}
-  .hero::before{content:'';position:absolute;inset:0;background:radial-gradient(circle at 50% 0%,${themeColor}22 0%,transparent 70%)}
-  .avatar{width:100px;height:100px;border-radius:50%;object-fit:cover;border:3px solid ${themeColor};margin:0 auto 16px;display:block;background:#1a1a2e}
-  .avatar-placeholder{width:100px;height:100px;border-radius:50%;background:linear-gradient(135deg,${themeColor},#4a90e2);margin:0 auto 16px;display:flex;align-items:center;justify-content:center;font-size:36px;font-weight:700;color:#fff}
-  .name{font-size:26px;font-weight:700;margin-bottom:6px;position:relative}
-  .vehicle{color:#aaa;font-size:14px;margin-bottom:10px;position:relative}
-  .stars{color:#FFD700;font-size:20px;margin-bottom:4px;position:relative}
-  .rating-text{color:#aaa;font-size:13px;margin-bottom:14px;position:relative}
-  .langs{display:inline-flex;gap:8px;flex-wrap:wrap;justify-content:center;margin-bottom:0;position:relative}
-  .lang-tag{background:rgba(255,255,255,0.08);border:1px solid rgba(255,255,255,0.12);border-radius:20px;padding:4px 12px;font-size:12px;color:#ccc}
-  .card{background:#111118;border:1px solid rgba(255,255,255,0.07);border-radius:20px;margin:16px;padding:22px}
-  .bio{color:#ccc;font-size:15px;line-height:1.6}
-  .section-title{font-size:13px;font-weight:600;color:${themeColor};text-transform:uppercase;letter-spacing:1px;margin-bottom:14px}
+  body{background:var(--c-bg);color:var(--c-text);font-family:var(--font);min-height:100vh;-webkit-font-smoothing:antialiased}
+  .wrap{max-width:480px;margin:0 auto}
+  .hero{background:linear-gradient(160deg,#0d0d1a 0%,#1a0d2e 50%,#0d0d1a 100%);padding:48px 20px 32px;text-align:center;position:relative;overflow:hidden}
+  .hero::before{content:'';position:absolute;inset:0;background:radial-gradient(circle at 50% 0%,var(--c-primary)22 0%,transparent 70%)}
+  .avatar{width:110px;height:110px;border-radius:50%;object-fit:cover;border:3px solid var(--c-primary);margin:0 auto 16px;display:block;background:#1a1a2e;position:relative}
+  .avatar-placeholder{width:110px;height:110px;border-radius:50%;background:linear-gradient(135deg,var(--c-primary),#4a90e2);margin:0 auto 16px;display:flex;align-items:center;justify-content:center;font-size:40px;font-weight:800;color:#fff;position:relative}
+  h1{font-size:28px;font-weight:800;margin-bottom:6px;position:relative;letter-spacing:-0.3px}
+  .vehicle{color:var(--c-muted);font-size:14px;margin-bottom:10px;position:relative}
+  .niche-badge{display:inline-block;background:var(--c-primary)22;border:1px solid var(--c-primary)44;color:var(--c-primary);border-radius:20px;padding:4px 14px;font-size:12px;font-weight:600;margin-bottom:12px;position:relative}
+  .stars{color:#FFD700;font-size:22px;margin-bottom:4px;position:relative;letter-spacing:2px}
+  .rating-text{color:var(--c-muted);font-size:13px;margin-bottom:16px;position:relative}
+  .langs{display:inline-flex;gap:8px;flex-wrap:wrap;justify-content:center;position:relative}
+  .lang-tag{background:rgba(255,255,255,0.08);border:1px solid rgba(255,255,255,0.12);border-radius:20px;padding:5px 14px;font-size:12px;color:var(--c-subtle);font-weight:500}
+  .stats-row{display:grid;grid-template-columns:repeat(3,1fr);gap:1px;background:var(--c-border);margin:0 16px;border-radius:var(--radius);overflow:hidden}
+  .stat{background:var(--c-card);padding:16px 8px;text-align:center}
+  .stat-val{font-size:22px;font-weight:800;color:var(--c-text)}
+  .stat-label{font-size:11px;color:var(--c-muted);margin-top:4px;text-transform:uppercase;letter-spacing:0.5px}
+  .card{background:var(--c-card);border:1px solid var(--c-border);border-radius:var(--radius);margin:16px;padding:22px}
+  .bio{color:var(--c-subtle);font-size:15px;line-height:1.7}
+  .section-title{font-size:13px;font-weight:600;color:var(--c-primary);text-transform:uppercase;letter-spacing:1px;margin-bottom:14px}
+  .pricing-grid{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+  .pricing-item{background:rgba(255,255,255,0.04);border:1px solid var(--c-border);border-radius:12px;padding:14px;display:flex;flex-direction:column;align-items:center;gap:4px}
+  .pricing-label{font-size:12px;color:var(--c-muted);text-transform:uppercase;letter-spacing:0.5px}
+  .pricing-price{font-size:20px;font-weight:700;color:var(--c-primary)}
+  .book-btn{display:block;width:calc(100% - 32px);margin:16px auto;background:linear-gradient(135deg,var(--c-primary),#4a90e2);border:none;border-radius:16px;padding:18px;font-size:17px;font-weight:700;color:#fff;cursor:pointer;transition:opacity .2s;text-align:center;text-decoration:none;font-family:var(--font)}
+  .book-btn:hover{opacity:.9}
   .tip-amounts{display:grid;grid-template-columns:repeat(4,1fr);gap:8px;margin-bottom:14px}
   .tip-btn{background:#1a1a2e;border:2px solid rgba(255,255,255,0.1);border-radius:12px;padding:12px 0;text-align:center;font-size:16px;font-weight:700;color:#fff;cursor:pointer;transition:all .2s}
-  .tip-btn.selected,.tip-btn:hover{border-color:${themeColor};background:${themeColor}22;color:${themeColor}}
-  .tip-custom{width:100%;background:#1a1a2e;border:1px solid rgba(255,255,255,0.12);border-radius:12px;padding:12px 16px;font-size:16px;color:#fff;margin-bottom:14px}
-  .pay-btn{width:100%;background:linear-gradient(135deg,${themeColor},#4a90e2);border:none;border-radius:16px;padding:18px;font-size:17px;font-weight:700;color:#fff;cursor:pointer;transition:opacity .2s}
+  .tip-btn.selected,.tip-btn:hover{border-color:var(--c-primary);background:var(--c-primary)22;color:var(--c-primary)}
+  .pay-btn{width:100%;background:linear-gradient(135deg,var(--c-primary),#4a90e2);border:none;border-radius:16px;padding:18px;font-size:17px;font-weight:700;color:#fff;cursor:pointer;transition:opacity .2s;font-family:var(--font)}
   .pay-btn:hover{opacity:.9}
   .pay-btn:disabled{opacity:.5;cursor:not-allowed}
   .review-stars{display:flex;gap:10px;justify-content:center;margin-bottom:16px}
-  .review-star{font-size:32px;cursor:pointer;color:#333;transition:color .15s}
+  .review-star{font-size:34px;cursor:pointer;color:#333;transition:color .15s}
   .review-star.lit{color:#FFD700}
-  textarea{width:100%;background:#1a1a2e;border:1px solid rgba(255,255,255,0.12);border-radius:12px;padding:14px;font-size:15px;color:#fff;resize:none;min-height:90px;margin-bottom:12px}
-  input[type=text],input[type=email]{width:100%;background:#1a1a2e;border:1px solid rgba(255,255,255,0.12);border-radius:12px;padding:14px;font-size:15px;color:#fff;margin-bottom:10px}
-  .submit-btn{width:100%;background:#1a1a2e;border:2px solid ${themeColor};border-radius:16px;padding:16px;font-size:16px;font-weight:700;color:${themeColor};cursor:pointer;transition:all .2s}
-  .submit-btn:hover{background:${themeColor};color:#fff}
-  .foreas-badge{text-align:center;padding:24px 16px 40px;color:#444;font-size:12px}
-  .foreas-badge a{color:${themeColor};text-decoration:none;font-weight:600}
+  textarea{width:100%;background:#1a1a2e;border:1px solid rgba(255,255,255,0.12);border-radius:12px;padding:14px;font-size:15px;color:#fff;resize:none;min-height:90px;margin-bottom:12px;font-family:var(--font)}
+  input[type=text],input[type=email]{width:100%;background:#1a1a2e;border:1px solid rgba(255,255,255,0.12);border-radius:12px;padding:14px;font-size:15px;color:#fff;margin-bottom:10px;font-family:var(--font)}
+  .submit-btn{width:100%;background:#1a1a2e;border:2px solid var(--c-primary);border-radius:16px;padding:16px;font-size:16px;font-weight:700;color:var(--c-primary);cursor:pointer;transition:all .2s;font-family:var(--font)}
+  .submit-btn:hover{background:var(--c-primary);color:#fff}
+  .foreas-badge{text-align:center;padding:32px 16px 48px;color:#444;font-size:12px}
+  .foreas-badge a{color:var(--c-primary);text-decoration:none;font-weight:600}
+  .foreas-badge .legal{margin-top:8px;font-size:10px;color:#333}
   .success-msg{background:#0d2b1a;border:1px solid #2ecc71;border-radius:12px;padding:16px;color:#2ecc71;text-align:center;margin-top:12px;display:none}
   .error-msg{background:#2b0d0d;border:1px solid #e74c3c;border-radius:12px;padding:16px;color:#e74c3c;text-align:center;margin-top:12px;display:none}
   .stripe-secure{font-size:12px;color:#555;text-align:center;margin-top:8px}
-  @media(max-width:400px){.tip-amounts{grid-template-columns:repeat(2,1fr)}}
+  @media(max-width:400px){.tip-amounts{grid-template-columns:repeat(2,1fr)}.pricing-grid{grid-template-columns:1fr}}
 </style>
 </head>
 <body>
+<div class="wrap">
 
 <!-- HERO -->
-<div class="hero">
+<header class="hero">
   ${
     site.photo_url
-      ? `<img class="avatar" src="${site.photo_url}" alt="${site.display_name}">`
-      : `<div class="avatar-placeholder">${(site.display_name || 'C')[0].toUpperCase()}</div>`
+      ? `<img class="avatar" src="${site.photo_url}" alt="Photo de ${displayName}, ${vehicleType} ${city}" width="110" height="110">`
+      : `<div class="avatar-placeholder">${displayName[0].toUpperCase()}</div>`
   }
-  <div class="name">${site.display_name}</div>
-  <div class="vehicle">${site.vehicle_type || 'Chauffeur VTC'} · ${site.city || 'France'}</div>
-  <div class="stars">${stars}</div>
-  <div class="rating-text">${(site.rating || 5).toFixed(1)}/5 · ${site.total_tip_count || 0} avis passagers</div>
-  <div class="langs">${(site.languages || ['Français']).map((l: string) => `<span class="lang-tag">${l}</span>`).join('')}</div>
+  <h1>${displayName}</h1>
+  <div class="vehicle">${vehicleType} · ${city}</div>
+  ${nicheLabel ? `<div class="niche-badge">${nicheLabel}</div>` : ''}
+  <div class="stars" aria-label="Note ${rating.toFixed(1)} sur 5">${stars}</div>
+  <div class="rating-text">${rating.toFixed(1)}/5 · ${totalTipCount} avis passagers</div>
+  <div class="langs">${languages.map((l: string) => `<span class="lang-tag">${l}</span>`).join('')}</div>
+</header>
+
+<!-- STATS -->
+<div class="stats-row">
+  <div class="stat"><div class="stat-val">${totalTrips}</div><div class="stat-label">Trajets</div></div>
+  <div class="stat"><div class="stat-val">${rating.toFixed(1)}</div><div class="stat-label">Note</div></div>
+  <div class="stat"><div class="stat-val">${viewCount}</div><div class="stat-label">Vues</div></div>
 </div>
 
 <!-- BIO -->
 <div class="card">
-  <div class="bio">${site.bio || `Chauffeur professionnel à votre service. Réservez votre prochain trajet ou laissez un pourboire.`}</div>
+  <div class="bio">${bio}</div>
 </div>
+
+${pricingHtml}
+
+<!-- CTA BOOKING -->
+<a href="https://wa.me/?text=${encodeURIComponent(`Bonjour ${displayName}, je souhaite réserver un trajet via votre page FOREAS.`)}" class="book-btn" target="_blank" rel="noopener">
+  📱 Contacter ${displayName}
+</a>
 
 <!-- POURBOIRE -->
 <div class="card">
@@ -599,7 +717,7 @@ function renderDriverPage(site: any, source: string): string {
   <input type="email" id="passengerEmail" placeholder="Votre email (reçu)" autocomplete="email">
   <button class="pay-btn" id="payBtn" onclick="processTip()" disabled>Payer en sécurité</button>
   <div class="stripe-secure">🔒 Paiement sécurisé par Stripe</div>
-  <div class="success-msg" id="tipSuccess">✅ Merci ! Votre pourboire a été envoyé à ${site.display_name}.</div>
+  <div class="success-msg" id="tipSuccess">Merci ! Votre pourboire a bien été envoyé.</div>
   <div class="error-msg" id="tipError"></div>
 </div>
 
@@ -607,24 +725,26 @@ function renderDriverPage(site: any, source: string): string {
 <div class="card">
   <div class="section-title">⭐ Laisser un avis</div>
   <div class="review-stars">
-    <span class="review-star" onclick="setRating(1)">★</span>
-    <span class="review-star" onclick="setRating(2)">★</span>
-    <span class="review-star" onclick="setRating(3)">★</span>
-    <span class="review-star" onclick="setRating(4)">★</span>
-    <span class="review-star" onclick="setRating(5)">★</span>
+    <span class="review-star" onclick="setRating(1)" aria-label="1 étoile">★</span>
+    <span class="review-star" onclick="setRating(2)" aria-label="2 étoiles">★</span>
+    <span class="review-star" onclick="setRating(3)" aria-label="3 étoiles">★</span>
+    <span class="review-star" onclick="setRating(4)" aria-label="4 étoiles">★</span>
+    <span class="review-star" onclick="setRating(5)" aria-label="5 étoiles">★</span>
   </div>
   <textarea id="reviewText" placeholder="Dites-nous comment s'est passé votre trajet..."></textarea>
   <input type="text" id="reviewName" placeholder="Votre prénom (optionnel)">
   <button class="submit-btn" onclick="submitReview()">Publier l'avis</button>
-  <div class="success-msg" id="reviewSuccess">✅ Merci pour votre avis !</div>
+  <div class="success-msg" id="reviewSuccess">Merci pour votre avis !</div>
   <div class="error-msg" id="reviewError"></div>
 </div>
 
 <!-- FOOTER -->
-<div class="foreas-badge">
-  Site créé par <a href="https://foreas.app" target="_blank">FOREAS</a> · Copilote IA pour chauffeurs<br>
-  <small>Votre trajet commence ici.</small>
-</div>
+<footer class="foreas-badge">
+  Site propulsé par <a href="https://foreas.app" target="_blank" rel="noopener">FOREAS</a> · Copilote IA pour chauffeurs VTC<br>
+  <div class="legal">© ${new Date().getFullYear()} FOREAS Labs · CGU · Confidentialité</div>
+</footer>
+
+</div><!-- /wrap -->
 
 <script>
   const BACKEND = '${backendUrl}';
@@ -633,10 +753,10 @@ function renderDriverPage(site: any, source: string): string {
   let selectedRating = 0;
 
   // Track view
-  fetch(BACKEND + '/api/driver-site/view/' + SLUG, {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({source:'${source}'})}).catch(()=>{});
+  fetch(BACKEND + '/api/driver-site/view/' + SLUG, {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({source:'${source}'})}).catch(function(){});
 
   function selectTip(amount) {
-    document.querySelectorAll('.tip-btn').forEach(b => b.classList.remove('selected'));
+    document.querySelectorAll('.tip-btn').forEach(function(b){b.classList.remove('selected')});
     document.getElementById('customTip').style.display = amount === 0 ? 'block' : 'none';
     if (amount > 0) {
       document.querySelector('[data-amount="'+amount+'"]').classList.add('selected');
@@ -653,62 +773,59 @@ function renderDriverPage(site: any, source: string): string {
   }
 
   function updatePayBtn() {
-    const btn = document.getElementById('payBtn');
+    var btn = document.getElementById('payBtn');
     btn.disabled = selectedAmount < 1;
     btn.textContent = selectedAmount >= 1 ? 'Payer ' + selectedAmount + '€ en sécurité' : 'Sélectionnez un montant';
   }
 
-  async function processTip() {
-    const btn = document.getElementById('payBtn');
-    const email = document.getElementById('passengerEmail').value;
+  function processTip() {
+    var btn = document.getElementById('payBtn');
+    var email = document.getElementById('passengerEmail').value;
     btn.disabled = true;
     btn.textContent = 'Traitement...';
     document.getElementById('tipError').style.display = 'none';
-    try {
-      const r = await fetch(BACKEND + '/api/driver-site/tip', {
-        method: 'POST',
-        headers: {'Content-Type':'application/json'},
-        body: JSON.stringify({slug: SLUG, amount: selectedAmount, email, source: '${source}'})
-      });
-      const data = await r.json();
+    fetch(BACKEND + '/api/driver-site/tip', {
+      method: 'POST',
+      headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({slug: SLUG, amount: selectedAmount, email: email, source: '${source}'})
+    }).then(function(r){return r.json()}).then(function(data) {
       if (data.checkout_url) {
         window.location.href = data.checkout_url;
       } else if (data.error) {
         throw new Error(data.error);
       }
-    } catch(e) {
+    }).catch(function(e) {
       document.getElementById('tipError').textContent = 'Erreur: ' + e.message;
       document.getElementById('tipError').style.display = 'block';
       btn.disabled = false;
       updatePayBtn();
-    }
+    });
   }
 
   function setRating(n) {
     selectedRating = n;
-    document.querySelectorAll('.review-star').forEach((s,i) => {
+    document.querySelectorAll('.review-star').forEach(function(s,i) {
       s.classList.toggle('lit', i < n);
     });
   }
 
-  async function submitReview() {
-    if (!selectedRating) { alert('Choisissez une note d\'abord'); return; }
-    const text = document.getElementById('reviewText').value;
-    const name = document.getElementById('reviewName').value;
+  function submitReview() {
+    if (!selectedRating) { alert('Choisissez une note d\\'abord'); return; }
+    var text = document.getElementById('reviewText').value;
+    var name = document.getElementById('reviewName').value;
     document.getElementById('reviewError').style.display = 'none';
-    try {
-      await fetch(BACKEND + '/api/driver-site/review', {
-        method: 'POST',
-        headers: {'Content-Type':'application/json'},
-        body: JSON.stringify({slug: SLUG, rating: selectedRating, text, name})
-      });
+    fetch(BACKEND + '/api/driver-site/review', {
+      method: 'POST',
+      headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({slug: SLUG, rating: selectedRating, text: text, name: name})
+    }).then(function() {
       document.getElementById('reviewSuccess').style.display = 'block';
       document.getElementById('reviewText').value = '';
       setRating(0);
-    } catch(e) {
+    }).catch(function() {
       document.getElementById('reviewError').textContent = 'Erreur, réessayez.';
       document.getElementById('reviewError').style.display = 'block';
-    }
+    });
   }
 </script>
 </body></html>`;
