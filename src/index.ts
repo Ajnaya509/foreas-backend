@@ -555,6 +555,36 @@ function renderDriverPage(site: any, source: string): string {
       : {}),
     priceRange: '€€',
     knowsLanguage: languages,
+    areaServed: {
+      '@type': 'City',
+      name: city,
+    },
+    potentialAction: [
+      {
+        '@type': 'ReserveAction',
+        target: {
+          '@type': 'EntryPoint',
+          urlTemplate: siteUrl,
+          actionPlatform: [
+            'http://schema.org/DesktopWebPlatform',
+            'http://schema.org/MobileWebPlatform',
+          ],
+        },
+        name: 'Réserver une course',
+      },
+      {
+        '@type': 'DonateAction',
+        target: {
+          '@type': 'EntryPoint',
+          urlTemplate: siteUrl,
+          actionPlatform: [
+            'http://schema.org/DesktopWebPlatform',
+            'http://schema.org/MobileWebPlatform',
+          ],
+        },
+        name: 'Laisser un pourboire',
+      },
+    ],
   };
 
   // Pricing grid HTML
@@ -601,6 +631,8 @@ ${
 }
 <meta property="og:locale" content="fr_FR">
 <meta property="og:site_name" content="FOREAS">
+<meta property="profile:first_name" content="${displayName.split(' ')[0]}">
+${displayName.split(' ').length > 1 ? `<meta property="profile:last_name" content="${displayName.split(' ').slice(1).join(' ')}">` : ''}
 
 <!-- Twitter Card -->
 <meta name="twitter:card" content="${site.photo_url ? 'summary_large_image' : 'summary'}">
