@@ -514,7 +514,8 @@ function renderDriverPage(site: any, source: string): string {
   const stars =
     '★'.repeat(Math.round(site.rating || 5)) + '☆'.repeat(5 - Math.round(site.rating || 5));
   const languages = (site.languages || ['Français']).join(' · ');
-  const backendUrl = process.env.BACKEND_URL || 'https://foreas-backend.railway.app';
+  const backendUrl =
+    process.env.BACKEND_URL || 'https://foreas-stripe-backend-production.up.railway.app';
   const themeColor = site.theme_color || '#8C52FF';
 
   return `<!DOCTYPE html>
@@ -752,7 +753,11 @@ app.post('/api/driver-site/generate', async (req: any, res: any) => {
     vehicle_type,
     city,
     rating,
+    total_trips,
     theme_color,
+    niche,
+    niche_label,
+    pricing,
   } = req.body || {};
   if (!driver_id || !display_name)
     return res.status(400).json({ error: 'driver_id + display_name requis' });
@@ -767,8 +772,14 @@ app.post('/api/driver-site/generate', async (req: any, res: any) => {
     const slug = existing?.slug || generateSlug(display_name);
     const generatedBio =
       bio ||
-      generateBio(display_name, city || 'France', rating || 5.0, 0, languages || ['Français']);
-    const siteData = {
+      generateBio(
+        display_name,
+        city || 'France',
+        rating || 5.0,
+        total_trips || 0,
+        languages || ['Français'],
+      );
+    const siteData: Record<string, any> = {
       driver_id,
       slug,
       display_name,
@@ -778,15 +789,22 @@ app.post('/api/driver-site/generate', async (req: any, res: any) => {
       vehicle_type: vehicle_type || null,
       city: city || null,
       rating: rating || 5.0,
+      total_trips: total_trips || 0,
       theme_color: theme_color || '#8C52FF',
       is_active: true,
       updated_at: new Date().toISOString(),
     };
+    // Add optional enriched fields if provided
+    if (niche) siteData.niche = niche;
+    if (niche_label) siteData.niche_label = niche_label;
+    if (pricing) siteData.pricing = pricing;
+
     const { data, error } = existing
       ? await supa.from('driver_sites').update(siteData).eq('id', existing.id).select().single()
       : await supa.from('driver_sites').insert(siteData).select().single();
     if (error) throw new Error(error.message);
-    const backendUrl = process.env.BACKEND_URL || 'https://foreas-backend.railway.app';
+    const backendUrl =
+      process.env.BACKEND_URL || 'https://foreas-stripe-backend-production.up.railway.app';
     return res.json({
       success: true,
       site: data,
@@ -809,7 +827,8 @@ app.get('/api/driver-site/mine/:driverId', async (req: any, res: any) => {
       .select('*')
       .eq('driver_id', driverId)
       .single();
-    const backendUrl = process.env.BACKEND_URL || 'https://foreas-backend.railway.app';
+    const backendUrl =
+      process.env.BACKEND_URL || 'https://foreas-stripe-backend-production.up.railway.app';
     if (!site) return res.json({ exists: false });
     return res.json({
       exists: true,
@@ -839,7 +858,8 @@ app.post('/api/driver-site/tip', async (req: any, res: any) => {
     const stripe = await getStripe();
     const amountCents = Math.round(amount * 100);
     const platformFeeCents = Math.round(amountCents * 0.15); // 15% FOREAS
-    const backendUrl = process.env.BACKEND_URL || 'https://foreas-backend.railway.app';
+    const backendUrl =
+      process.env.BACKEND_URL || 'https://foreas-stripe-backend-production.up.railway.app';
     // Stripe Checkout pour le pourboire
     const session = await stripe.checkout.sessions.create({
       mode: 'payment',
@@ -930,13 +950,11 @@ app.post('/api/driver-site/view/:slug', async (req: any, res: any) => {
         .from('driver_sites')
         .update({ view_count: supa.rpc('increment', { x: 1 }) })
         .eq('id', site.id),
-      supa
-        .from('driver_site_interactions')
-        .insert({
-          driver_site_id: site.id,
-          interaction_type: 'view',
-          scan_source: source || 'link',
-        }),
+      supa.from('driver_site_interactions').insert({
+        driver_site_id: site.id,
+        interaction_type: 'view',
+        scan_source: source || 'link',
+      }),
     ]);
     return res.json({ ok: true });
   } catch {
@@ -973,7 +991,8 @@ app.post('/api/driver-site/connect/onboard', async (req: any, res: any) => {
         .eq('driver_id', driver_id);
     }
     // Générer le lien d'onboarding
-    const backendUrl = process.env.BACKEND_URL || 'https://foreas-backend.railway.app';
+    const backendUrl =
+      process.env.BACKEND_URL || 'https://foreas-stripe-backend-production.up.railway.app';
     const accountLink = await stripe.accountLinks.create({
       account: accountId,
       refresh_url: `${backendUrl}/api/driver-site/connect/onboard`,

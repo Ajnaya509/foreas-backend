@@ -40,7 +40,7 @@ async function getResend() {
   return resendClient;
 }
 
-// ─── Bird SMS (same provider as OTP) ─────────────────────────────────────────
+// ─── SMS (Bird API + MessageBird REST fallback, same as OTP) ─────────────────
 
 const BIRD_API_KEY = () => process.env.BIRD_API_KEY || process.env.MESSAGEBIRD_API_KEY || '';
 const BIRD_WORKSPACE_ID = () => process.env.BIRD_WORKSPACE_ID || 'default';
@@ -48,40 +48,69 @@ const BIRD_CHANNEL_ID = () => process.env.BIRD_CHANNEL_ID || '';
 
 async function sendSMS(phone: string, message: string): Promise<boolean> {
   const apiKey = BIRD_API_KEY();
-  const channelId = BIRD_CHANNEL_ID();
-  const workspaceId = BIRD_WORKSPACE_ID();
-
-  if (!apiKey || !channelId) {
-    console.warn('[SMS] Bird not configured — skipping SMS to', phone);
+  if (!apiKey) {
+    console.warn('[SMS] No API key configured — skipping SMS to', phone);
     return false;
   }
 
-  try {
-    const resp = await fetch(
-      `https://api.bird.com/workspaces/${workspaceId}/channels/${channelId}/messages`,
-      {
-        method: 'POST',
-        headers: {
-          Authorization: `AccessKey ${apiKey}`,
-          'Content-Type': 'application/json',
+  const channelId = BIRD_CHANNEL_ID();
+  const workspaceId = BIRD_WORKSPACE_ID();
+
+  // Strategy 1: Bird API (if channel configured)
+  if (channelId) {
+    try {
+      const resp = await fetch(
+        `https://api.bird.com/workspaces/${workspaceId}/channels/${channelId}/messages`,
+        {
+          method: 'POST',
+          headers: {
+            Authorization: `Bearer ${apiKey}`,
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({
+            receiver: {
+              contacts: [{ identifierValue: phone, identifierKey: 'phonenumber' }],
+            },
+            body: { type: 'text', text: { text: message } },
+          }),
         },
-        body: JSON.stringify({
-          receiver: { contacts: [{ identifierValue: phone }] },
-          body: { type: 'text', text: { text: message } },
-        }),
-      },
-    );
+      );
 
-    if (!resp.ok) {
+      if (resp.ok) {
+        console.log('[SMS] ✅ Sent via Bird to', phone.substring(0, 6) + '***');
+        return true;
+      }
       const err = await resp.text();
-      console.error('[SMS] Bird error:', resp.status, err);
-      return false;
+      console.error('[SMS] Bird error:', resp.status, err, '→ trying MessageBird fallback');
+    } catch (err: any) {
+      console.error('[SMS] Bird failed:', err.message, '→ trying MessageBird fallback');
     }
+  }
 
-    console.log('[SMS] Sent to', phone.substring(0, 6) + '***');
-    return true;
+  // Strategy 2: MessageBird REST API fallback (no channel needed)
+  try {
+    const resp = await fetch('https://rest.messagebird.com/messages', {
+      method: 'POST',
+      headers: {
+        Authorization: `AccessKey ${apiKey}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        originator: 'FOREAS',
+        recipients: [phone],
+        body: message,
+      }),
+    });
+
+    if (resp.ok) {
+      console.log('[SMS] ✅ Sent via MessageBird to', phone.substring(0, 6) + '***');
+      return true;
+    }
+    const err = await resp.text();
+    console.error('[SMS] MessageBird error:', resp.status, err);
+    return false;
   } catch (err: any) {
-    console.error('[SMS] Send failed:', err.message);
+    console.error('[SMS] All providers failed:', err.message);
     return false;
   }
 }
@@ -195,19 +224,17 @@ router.post('/', async (req: Request, res: Response) => {
     !dropoff_address ||
     !scheduled_at
   ) {
-    return res
-      .status(400)
-      .json({
-        error: 'Champs requis manquants',
-        required: [
-          'siteSlug',
-          'clientPhone',
-          'clientEmail',
-          'pickupAddress',
-          'dropoffAddress',
-          'scheduledAt',
-        ],
-      });
+    return res.status(400).json({
+      error: 'Champs requis manquants',
+      required: [
+        'siteSlug',
+        'clientPhone',
+        'clientEmail',
+        'pickupAddress',
+        'dropoffAddress',
+        'scheduledAt',
+      ],
+    });
   }
 
   if (!estimated_price || estimated_price < 0) {
