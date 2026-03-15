@@ -195,6 +195,20 @@ async function loadBookingRoutes(): Promise<void> {
   }
 }
 
+// ── Ajnaya IA routes (Whisper + GPT-4o + ElevenLabs TTS) ──
+let ajnayaRoutesLoaded = false;
+async function loadAjnayaRoutes(): Promise<void> {
+  if (ajnayaRoutesLoaded) return;
+  try {
+    const ajnayaRouter = (await import('./routes/ajnaya.js')).default;
+    app.use('/api/ajnaya', ajnayaRouter);
+    ajnayaRoutesLoaded = true;
+    console.log('[Ajnaya] Routes mounted at /api/ajnaya');
+  } catch (err: any) {
+    console.error(`[Ajnaya] Failed to load: ${err.message}`);
+  }
+}
+
 // Charger toutes les routes après le serveur prêt
 setTimeout(() => {
   loadOtpRoutes();
@@ -202,6 +216,7 @@ setTimeout(() => {
   loadAdminRoutes();
   loadAnalyticsRoutes();
   loadBookingRoutes();
+  loadAjnayaRoutes();
 }, 0);
 
 // ============================================

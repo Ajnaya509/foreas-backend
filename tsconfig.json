@@ -10,11 +10,7 @@
     "skipLibCheck": true,
     "resolveJsonModule": true
   },
-  "include": [
-    "src/index.ts",
-    "src/helpers/**/*",
-    "src/routes/**/*"
-  ],
+  "include": ["src/index.ts", "src/helpers/**/*", "src/routes/**/*"],
   "exclude": [
     "src/__tests__",
     "src/app",
@@ -27,7 +23,6 @@
     "src/utils",
     "src/config",
     "src/demo",
-    "src/env.ts",
-    "src/routes/ajnaya.ts"
+    "src/env.ts"
   ]
 }
