@@ -12,6 +12,23 @@ import 'dotenv/config';
 import express from 'express';
 import cors from 'cors';
 
+// ── Driver Site Template (v3.0) ──
+import { renderDriverPage as renderDriverPageV3 } from './driverSiteTemplate.js';
+
+// ── Real Supabase + Email imports for Stripe webhooks ──
+import { upsertUserByEmail, setSubscriptionStatus, logEvent } from './services/supa.js';
+import {
+  sendSubscriptionActivated,
+  sendPaymentSucceeded,
+  sendPaymentFailed1,
+  sendPaymentFailed2,
+  sendPaymentFailedFinal,
+  sendSubscriptionSuspended,
+  sendSubscriptionCanceled,
+  sendSubscriptionReactivated,
+  sendPlanChanged,
+} from './services/email.js';
+
 // ============================================
 // APP INIT - UN SEUL express()
 // ============================================
@@ -56,6 +73,35 @@ app.get('/', (_req, res) => {
   res.send(`FOREAS Backend v${VERSION} (${GIT_SHA.substring(0, 7)})`);
 });
 
+// Legal pages served by Vercel (foreas.xyz) — /cgu, /confidentialite, /mentions-legales, /suppression-compte
+
+// ============================================
+// INTERNAL ROUTES - Protégées par SERVICE_ROLE_KEY
+// Pour cron jobs, ingestion RAG, opérations internes
+// ============================================
+app.post('/api/internal/rag/ingest', express.json(), async (req, res) => {
+  const authHeader = req.headers.authorization;
+  const serviceKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
+
+  if (!serviceKey || !authHeader || authHeader !== `Bearer ${serviceKey}`) {
+    return res.status(401).json({ error: 'Invalid service key' });
+  }
+
+  try {
+    const { ingestKnowledgeBase, reingestKnowledgeBase } =
+      await import('./ai/rag/ingestKnowledgeBase.js');
+    const force = req.body?.force === true;
+    console.log(`[Internal] RAG ingestion triggered (force=${force})`);
+
+    const result = force ? await reingestKnowledgeBase() : await ingestKnowledgeBase();
+
+    res.json({ success: true, ...result });
+  } catch (err: any) {
+    console.error('[Internal] RAG ingestion error:', err);
+    res.status(500).json({ error: `Ingestion failed: ${err.message}` });
+  }
+});
+
 // ============================================
 // LAZY STRIPE - Chargé au premier usage
 // ============================================
@@ -83,26 +129,176 @@ app.post('/api/webhooks/stripe', express.raw({ type: 'application/json' }), asyn
     return res.status(400).send('Missing signature or secret');
   }
 
+  let event: import('stripe').Stripe.Event;
   try {
     const stripe = await getStripe();
-    const event = stripe.webhooks.constructEvent(req.body, sig, whSecret);
+    event = stripe.webhooks.constructEvent(req.body, sig, whSecret);
+  } catch (err: any) {
+    console.error(`[Stripe] Webhook signature error: ${err.message}`);
+    return res.status(400).send(`Webhook Error: ${err.message}`);
+  }
 
-    switch (event.type) {
-      case 'checkout.session.completed':
-      case 'payment_intent.succeeded':
-      case 'invoice.payment_succeeded':
-        console.log(`[Stripe] Event: ${event.type}`);
-        markPremiumNow();
-        break;
-      default:
-        console.log(`[Stripe] Unhandled: ${event.type}`);
+  try {
+    // ── checkout.session.completed ──
+    if (event.type === 'checkout.session.completed') {
+      const session = event.data.object as any;
+      console.log('✅ checkout.session.completed', session.id);
+      if (session.customer_email) {
+        const user = await upsertUserByEmail(session.customer_email);
+        const planName = session.metadata?.plan_name || 'FOREAS Pro';
+        await setSubscriptionStatus({
+          userId: user.id,
+          provider: 'stripe',
+          status: 'active',
+          currentPeriodEnd: null,
+          productId: session.metadata?.price_id || null,
+        });
+        await logEvent(user.id, 'checkout.session.completed', session);
+        await sendSubscriptionActivated(
+          session.customer_email,
+          session.metadata?.name || 'Chauffeur',
+          planName,
+        );
+        console.log('✅ Subscription activée pour:', session.customer_email);
+      }
+      markPremiumNow();
     }
 
-    res.json({ received: true });
-  } catch (err: any) {
-    console.error(`[Stripe] Webhook error: ${err.message}`);
-    res.status(400).send(`Webhook Error: ${err.message}`);
+    // ── invoice.payment_succeeded ──
+    if (event.type === 'invoice.payment_succeeded') {
+      const invoice = event.data.object as any;
+      console.log('✅ invoice.payment_succeeded', invoice.id);
+      if (invoice.customer_email) {
+        const user = await upsertUserByEmail(invoice.customer_email);
+        const periodEnd = invoice.lines?.data?.[0]?.period?.end
+          ? new Date(invoice.lines.data[0].period.end * 1000).toISOString()
+          : null;
+        await setSubscriptionStatus({
+          userId: user.id,
+          provider: 'stripe',
+          status: 'active',
+          currentPeriodEnd: periodEnd,
+          productId: invoice.lines?.data?.[0]?.price?.id || null,
+        });
+        await logEvent(user.id, 'invoice.payment_succeeded', invoice);
+        const amountPaid = ((invoice.amount_paid || 0) / 100).toFixed(2) + ' €';
+        const nextDate = periodEnd
+          ? new Date(periodEnd).toLocaleDateString('fr-FR', {
+              day: 'numeric',
+              month: 'long',
+              year: 'numeric',
+            })
+          : 'prochaine échéance';
+        await sendPaymentSucceeded(
+          invoice.customer_email,
+          invoice.customer_name || 'Chauffeur',
+          amountPaid,
+          nextDate,
+        );
+      }
+      markPremiumNow();
+    }
+
+    // ── invoice.payment_failed ──
+    if (event.type === 'invoice.payment_failed') {
+      const invoice = event.data.object as any;
+      console.log('⚠️ invoice.payment_failed', invoice.id);
+      if (invoice.customer_email) {
+        const user = await upsertUserByEmail(invoice.customer_email);
+        const attemptCount = invoice.attempt_count || 1;
+        const name = invoice.customer_name || 'Chauffeur';
+        await logEvent(user.id, 'invoice.payment_failed', { invoiceId: invoice.id, attemptCount });
+        if (attemptCount === 1) {
+          await setSubscriptionStatus({
+            userId: user.id,
+            provider: 'stripe',
+            status: 'past_due',
+            currentPeriodEnd: null,
+          });
+          await sendPaymentFailed1(invoice.customer_email, name);
+        } else if (attemptCount === 2) {
+          await sendPaymentFailed2(invoice.customer_email, name);
+        } else if (attemptCount >= 3) {
+          await setSubscriptionStatus({
+            userId: user.id,
+            provider: 'stripe',
+            status: 'suspended',
+            currentPeriodEnd: null,
+          });
+          await sendPaymentFailedFinal(invoice.customer_email, name);
+          await sendSubscriptionSuspended(invoice.customer_email, name);
+        }
+      }
+    }
+
+    // ── customer.subscription.updated ──
+    if (event.type === 'customer.subscription.updated') {
+      const subscription = event.data.object as any;
+      const previousAttributes = (event.data as any).previous_attributes || {};
+      const customerEmail = subscription.metadata?.customer_email || subscription.customer_email;
+      if (customerEmail) {
+        const user = await upsertUserByEmail(customerEmail);
+        const name = subscription.metadata?.name || 'Chauffeur';
+        const periodEnd = subscription.current_period_end
+          ? new Date(subscription.current_period_end * 1000).toISOString()
+          : null;
+        await setSubscriptionStatus({
+          userId: user.id,
+          provider: 'stripe',
+          status: subscription.status === 'active' ? 'active' : subscription.status,
+          currentPeriodEnd: periodEnd,
+          productId: subscription.items?.data?.[0]?.price?.id || null,
+        });
+        await logEvent(user.id, 'customer.subscription.updated', subscription);
+        if (
+          previousAttributes.status &&
+          previousAttributes.status !== 'active' &&
+          subscription.status === 'active'
+        ) {
+          await sendSubscriptionReactivated(
+            customerEmail,
+            name,
+            subscription.items?.data?.[0]?.price?.nickname || 'FOREAS Pro',
+          );
+        }
+        if (previousAttributes.items) {
+          const oldPriceId = previousAttributes.items?.data?.[0]?.price?.id;
+          const newPriceId = subscription.items?.data?.[0]?.price?.id;
+          if (oldPriceId && newPriceId && oldPriceId !== newPriceId) {
+            await sendPlanChanged(
+              customerEmail,
+              name,
+              previousAttributes.items?.data?.[0]?.price?.nickname || oldPriceId,
+              subscription.items?.data?.[0]?.price?.nickname || newPriceId,
+            );
+          }
+        }
+      }
+    }
+
+    // ── customer.subscription.deleted ──
+    if (event.type === 'customer.subscription.deleted') {
+      const subscription = event.data.object as any;
+      const customerEmail = subscription.metadata?.customer_email || subscription.customer_email;
+      if (customerEmail) {
+        const user = await upsertUserByEmail(customerEmail);
+        await setSubscriptionStatus({
+          userId: user.id,
+          provider: 'stripe',
+          status: 'canceled',
+          currentPeriodEnd: null,
+        });
+        await logEvent(user.id, 'customer.subscription.deleted', subscription);
+        await sendSubscriptionCanceled(customerEmail, subscription.metadata?.name || 'Chauffeur');
+      }
+    }
+
+    await logEvent(null, event.type, event.data.object);
+  } catch (dbError: any) {
+    console.error('❌ Database/Email error in webhook:', dbError.message);
   }
+
+  return res.json({ received: true });
 });
 
 // ============================================
@@ -195,7 +391,6 @@ async function loadBookingRoutes(): Promise<void> {
   }
 }
 
-// ── Ajnaya IA routes (Whisper + GPT-4o + ElevenLabs TTS) ──
 let ajnayaRoutesLoaded = false;
 async function loadAjnayaRoutes(): Promise<void> {
   if (ajnayaRoutesLoaded) return;
@@ -501,24 +696,112 @@ async function getSupabaseAdmin() {
 
 // ── Helper : générer un slug unique à partir du nom ──────────
 function generateSlug(name: string): string {
-  const base = name
+  // Use ONLY first name for cleaner, shorter slugs (e.g. chandler-a9x2)
+  const firstName = name.split(/[\s-]+/)[0] || name;
+  const base = firstName
     .toLowerCase()
     .normalize('NFD')
     .replace(/[\u0300-\u036f]/g, '')
     .replace(/[^a-z0-9]+/g, '-')
     .replace(/^-|-$/g, '')
-    .substring(0, 30);
+    .substring(0, 20);
   const suffix = Math.random().toString(36).substring(2, 6);
   return `${base}-${suffix}`;
 }
 
-// ── Helper : générer la bio Ajnaya (PAS Framework) ───────────
+// ── Helper : générer un code promo unique (voucher-code-generator) ──
+function generatePromoCode(name: string): string {
+  // eslint-disable-next-line @typescript-eslint/no-var-requires
+  const voucher_codes = require('voucher-code-generator');
+
+  // Prefix from driver name (3 first letters, uppercase, accents stripped)
+  const prefix =
+    name
+      .normalize('NFD')
+      .replace(/[\u0300-\u036f]/g, '')
+      .replace(/[^a-zA-Z]/g, '')
+      .substring(0, 3)
+      .toUpperCase() || 'VTC';
+
+  // Generate 1 code with pattern: PREFIX-XXXXX (no ambiguous chars I/O/0/1/L)
+  const codes = voucher_codes.generate({
+    length: 6,
+    count: 1,
+    charset: 'ABCDEFGHJKMNPQRSTUVWXYZ23456789', // no I/O/0/1/L for readability
+    prefix: `${prefix}-`,
+  });
+  return codes[0]; // e.g. "CHA-7K9M4P"
+}
+
+// ── Helper : envoyer le code promo par email au chauffeur ──────
+async function sendPromoCodeEmail(
+  driverEmail: string,
+  driverName: string,
+  promoCode: string,
+  promoPercent: number,
+  siteUrl: string,
+): Promise<boolean> {
+  const apiKey = process.env.RESEND_API_KEY;
+  if (!apiKey || !driverEmail) {
+    console.warn('[PromoEmail] Skipping — no API key or no email');
+    return false;
+  }
+  try {
+    const { Resend } = await import('resend');
+    const resend = new Resend(apiKey);
+    const fromEmail = process.env.RESEND_FROM_EMAIL || 'noreply@foreas.xyz';
+    await resend.emails.send({
+      from: `FOREAS <${fromEmail}>`,
+      to: driverEmail,
+      subject: `🎁 Votre code promo FOREAS : ${promoCode}`,
+      html: `
+<!DOCTYPE html>
+<html>
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"></head>
+<body style="margin:0;padding:0;background:#0D0D0D;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif">
+<div style="max-width:520px;margin:0 auto;padding:32px 24px">
+  <div style="text-align:center;margin-bottom:24px">
+    <div style="font-size:28px;font-weight:800;color:#fff">FOREAS</div>
+    <div style="font-size:13px;color:#888;margin-top:4px">Votre site chauffeur</div>
+  </div>
+  <div style="background:#1A1A2E;border-radius:16px;padding:32px 24px;text-align:center;border:1px solid #2A2A4A">
+    <div style="font-size:16px;color:#ccc;margin-bottom:8px">Bonjour ${driverName.split(' ')[0]},</div>
+    <div style="font-size:14px;color:#aaa;margin-bottom:24px;line-height:1.6">
+      Votre code promo est prêt ! Partagez-le avec vos clients pour leur offrir
+      <strong style="color:#F59E0B">-${promoPercent}%</strong> sur leur première course.
+    </div>
+    <div style="background:#111;border-radius:12px;padding:20px;margin-bottom:24px;border:2px dashed #F59E0B">
+      <div style="font-size:36px;font-weight:900;color:#F59E0B;letter-spacing:6px;font-family:monospace">${promoCode}</div>
+    </div>
+    <div style="font-size:13px;color:#888;margin-bottom:20px">
+      Ce code est unique et lié à votre profil. Il apparaît sur votre page publique.
+    </div>
+    <a href="${siteUrl}" style="display:inline-block;background:#8C52FF;color:#fff;padding:12px 32px;border-radius:8px;font-weight:700;text-decoration:none;font-size:14px">
+      Voir ma page →
+    </a>
+  </div>
+  <div style="text-align:center;margin-top:20px;font-size:11px;color:#555">
+    © ${new Date().getFullYear()} FOREAS Labs — Ne pas répondre à cet email.
+  </div>
+</div>
+</body></html>`,
+    });
+    console.log(`[PromoEmail] ✅ Sent to ${driverEmail} — code: ${promoCode}`);
+    return true;
+  } catch (err: any) {
+    console.error(`[PromoEmail] ❌ Failed:`, err.message);
+    return false;
+  }
+}
+
+// ── Helper : générer la bio Ajnaya (PAS Framework — niche-aware) ───────────
 function generateBio(
   name: string,
   city: string,
   rating: number,
   trips: number,
   languages: string[],
+  niche?: string | null,
 ): string {
   const firstName = name.split(' ')[0];
   const langStr = languages.length > 1 ? languages.join(', ') : '';
@@ -531,19 +814,72 @@ function generateBio(
   const ratingText =
     rating >= 4.5 ? `noté ${rating.toFixed(1)}/5 par ses passagers` : `note ${rating.toFixed(1)}/5`;
 
-  // 3 templates PAS (Problem-Agitate-Solution) — variation déterministe
+  // Niche-specific PAS bios — tailored to each specialization
+  const nicheBios: Record<string, string> = {
+    corporate: `Besoin d'un chauffeur pour vos déplacements professionnels à ${city} ? ${firstName} est spécialisé corporate : ponctualité absolue, discrétion et confort premium. ${ratingText}, ${tripsText}.${langStr ? ` Parle ${langStr}.` : ''} Réservez en 30 secondes.`,
+    evenementiel: `Un événement à ${city} ? ${firstName} assure vos mariages, galas et soirées avec élégance et fiabilité. ${ratingText}, ${tripsText}.${langStr ? ` ${langStr}.` : ''} Réservez votre chauffeur dédié en quelques clics.`,
+    medical: `Rendez-vous médical à ${city} ? ${firstName} est chauffeur spécialisé santé : accompagnement patient, aide à la montée et trajets adaptés. ${ratingText}, ${tripsText}.${langStr ? ` ${langStr}.` : ''} Réservez simplement.`,
+    transfert: `Transfert aéroport ou gare à ${city} ? ${firstName} assure vos trajets longue distance avec suivi des vols et aide bagages. ${ratingText}, ${tripsText}.${langStr ? ` Parle ${langStr}.` : ''} Réservation rapide et gratuite.`,
+    nuit: `Sortie nocturne à ${city} ? ${firstName} vous ramène en toute sécurité. Clubs, restaurants, after-work : disponible en soirée et la nuit. ${ratingText}, ${tripsText}.${langStr ? ` ${langStr}.` : ''} Réservez en 30 secondes.`,
+    famille: `Trajet en famille à ${city} ? ${firstName} est équipé sièges enfants, patient et bienveillant. Trajets scolaires, sorties famille, courses. ${ratingText}, ${tripsText}.${langStr ? ` ${langStr}.` : ''} Réservez facilement.`,
+    premium: `Service VTC haut de gamme à ${city}. ${firstName} offre véhicule premium, présentation impeccable et service sur-mesure. ${ratingText}, ${tripsText}.${langStr ? ` Parle ${langStr}.` : ''} Réservez votre chauffeur d'exception.`,
+  };
+
+  // If niche-specific bio exists, use it
+  if (niche && nicheBios[niche]) return nicheBios[niche];
+
+  // Generic PAS fallback — 3 templates with deterministic variation
   const variant = name.length % 3;
 
   if (variant === 0) {
-    // Template A: Urgence + fiabilité
     return `Besoin d'un trajet fiable à ${city} ? ${firstName} est chauffeur VTC professionnel, ${ratingText} avec ${tripsText}. Ponctualité, confort et discrétion garantis.${langStr ? ` Parle ${langStr}.` : ''} Réservez en 30 secondes, sans application à télécharger.`;
   } else if (variant === 1) {
-    // Template B: Confiance + expérience
     return `Vous cherchez un chauffeur de confiance à ${city} ? ${firstName}, ${ratingText}, assure vos trajets avec professionnalisme et ponctualité. ${tripsText} et des passagers satisfaits.${langStr ? ` Langues : ${langStr}.` : ''} Réservez directement — réponse rapide garantie.`;
   } else {
-    // Template C: Simplicité + résultat
     return `${firstName}, chauffeur VTC à ${city}. ${tripsText}, ${ratingText}. Véhicule propre, trajet sans stress, arrivée à l'heure.${langStr ? ` ${langStr}.` : ''} Réservez votre course en quelques clics — c'est simple, rapide et gratuit.`;
   }
+}
+
+function getNicheServiceOptions(niche: string | null): string {
+  const base = [
+    { value: 'transfer', label: 'Transfert / Trajet' },
+    { value: 'airport', label: 'Aéroport' },
+    { value: 'hourly', label: 'Mise à disposition' },
+    { value: 'event', label: 'Événement' },
+  ];
+  const nicheExtras: Record<string, { value: string; label: string }[]> = {
+    corporate: [
+      { value: 'business_meeting', label: 'Rendez-vous professionnel' },
+      { value: 'seminar', label: 'Séminaire / Conférence' },
+    ],
+    evenementiel: [
+      { value: 'wedding', label: 'Mariage' },
+      { value: 'gala', label: 'Gala / Soirée' },
+    ],
+    medical: [
+      { value: 'hospital', label: 'Rendez-vous médical' },
+      { value: 'mobility', label: 'Mobilité réduite' },
+    ],
+    transfert: [
+      { value: 'train_station', label: 'Gare' },
+      { value: 'long_distance', label: 'Longue distance' },
+    ],
+    nuit: [
+      { value: 'nightclub', label: 'Sortie nocturne' },
+      { value: 'restaurant', label: 'Restaurant / After-work' },
+    ],
+    famille: [
+      { value: 'school', label: 'Trajet scolaire' },
+      { value: 'family_outing', label: 'Sortie en famille' },
+    ],
+    premium: [
+      { value: 'vip', label: 'Service VIP' },
+      { value: 'luxury_hotel', label: 'Hôtel de luxe' },
+    ],
+  };
+  const extras = niche && nicheExtras[niche] ? nicheExtras[niche] : [];
+  const allOptions = [...base, ...extras];
+  return allOptions.map((o) => `<option value="${o.value}">${o.label}</option>`).join('\n        ');
 }
 
 // ── Page HTML publique passager (/c/:slug) — CRO OPTIMISÉ ────
@@ -552,18 +888,37 @@ function renderDriverPage(site: any, source: string): string {
   const stars = '★'.repeat(Math.round(rating)) + '☆'.repeat(5 - Math.round(rating));
   const backendUrl =
     process.env.BACKEND_URL || 'https://foreas-stripe-backend-production.up.railway.app';
-  const siteUrl = `${backendUrl}/c/${site.slug}`;
+  // Use BACKEND_URL for public pages — it's the actual server that serves /c/:slug
+  // PUBLIC_SITE_URL (app.foreas.xyz) only used if custom domain is properly routed
+  const publicUrl = backendUrl;
+  const siteUrl = `${publicUrl}/c/${site.slug}`;
   const themeColor = site.theme_color || '#8C52FF';
   const displayName = site.display_name || 'Chauffeur';
   const firstName = displayName.split(' ')[0];
   const city = site.city || 'France';
-  const vehicleType = site.vehicle_type || 'Chauffeur VTC';
+  // Derive vehicle type from niche if not explicitly set
+  const nicheLabels: Record<string, string> = {
+    corporate: 'VTC Corporate',
+    evenementiel: 'VTC Événementiel',
+    medical: 'VTC Médical',
+    transfert: 'VTC Transfert',
+    nuit: 'VTC Nuit',
+    famille: 'VTC Famille',
+    premium: 'VTC Premium',
+  };
+  const vehicleType =
+    site.vehicle_type ||
+    site.niche_label ||
+    (site.niche && nicheLabels[site.niche]) ||
+    'Chauffeur VTC';
   const totalTrips = site.total_trips || 0;
   const totalTipCount = site.total_tip_count || 0;
   const languages = site.languages || ['Français'];
-  const bio = site.bio || generateBio(displayName, city, rating, totalTrips, languages);
+  const bio = site.bio || generateBio(displayName, city, rating, totalTrips, languages, site.niche);
   const metaDescription = bio.substring(0, 155).replace(/"/g, '&quot;');
   const pricing = site.pricing || null;
+  const promoCode = site.promo_code || null;
+  const promoPercent = site.promo_discount_percent || 0;
 
   // JSON-LD structured data
   const jsonLd = {
@@ -623,6 +978,22 @@ function renderDriverPage(site: any, source: string): string {
     ],
   };
 
+  // BreadcrumbList for SEO
+  const breadcrumbLd = {
+    '@context': 'https://schema.org',
+    '@type': 'BreadcrumbList',
+    itemListElement: [
+      { '@type': 'ListItem', position: 1, name: 'FOREAS', item: 'https://foreas.app' },
+      {
+        '@type': 'ListItem',
+        position: 2,
+        name: 'Chauffeurs',
+        item: `${siteUrl.split('/c/')[0]}/c`,
+      },
+      { '@type': 'ListItem', position: 3, name: displayName, item: siteUrl },
+    ],
+  };
+
   // Pricing grid HTML
   let pricingHtml = '';
   if (pricing && typeof pricing === 'object') {
@@ -679,8 +1050,16 @@ ${displayName.split(' ').length > 1 ? `<meta property="profile:last_name" conten
 <meta name="twitter:description" content="${metaDescription}">
 ${site.photo_url ? `<meta name="twitter:image" content="${site.photo_url}">` : ''}
 
+<!-- Enhanced SEO -->
+<meta name="geo.region" content="FR">
+<meta name="geo.placename" content="${city}">
+<link rel="alternate" hreflang="fr" href="${siteUrl}">
+<meta name="format-detection" content="telephone=yes">
+<link rel="preload" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" as="style">
+
 <!-- JSON-LD Structured Data -->
 <script type="application/ld+json">${JSON.stringify(jsonLd)}</script>
+<script type="application/ld+json">${JSON.stringify(breadcrumbLd)}</script>
 
 <!-- Google Fonts -->
 <link rel="preconnect" href="https://fonts.googleapis.com">
@@ -793,6 +1172,15 @@ ${site.photo_url ? `<meta name="twitter:image" content="${site.photo_url}">` : '
   .sticky-bar-btn:hover{opacity:.92}
   .sticky-bar-btn:active{transform:scale(0.98)}
 
+  /* ── ADDRESS AUTOCOMPLETE ── */
+  .addr-wrap{position:relative}
+  .addr-suggestions{position:absolute;top:100%;left:0;right:0;background:#1a1a2e;border:1px solid rgba(255,255,255,0.15);border-top:none;border-radius:0 0 12px 12px;max-height:220px;overflow-y:auto;z-index:100;display:none}
+  .addr-suggestions.open{display:block}
+  .addr-item{padding:12px 14px;font-size:14px;color:#ddd;cursor:pointer;border-bottom:1px solid rgba(255,255,255,0.05);font-family:var(--font);transition:background .15s}
+  .addr-item:hover,.addr-item:focus{background:rgba(140,82,255,0.15);color:#fff}
+  .addr-item:last-child{border-bottom:none;border-radius:0 0 12px 12px}
+  .addr-item .addr-city{color:var(--c-muted);font-size:12px;margin-top:2px}
+
   @media(max-width:400px){.tip-amounts{grid-template-columns:repeat(2,1fr)}.pricing-grid{grid-template-columns:1fr}.field-row{flex-direction:column;gap:0}}
 </style>
 </head>
@@ -850,15 +1238,27 @@ ${site.photo_url ? `<meta name="twitter:image" content="${site.photo_url}">` : '
     <div class="field-group">
       <div class="field-label">Type de service</div>
       <select class="b-input" id="bService">
-        <option value="transfer">Transfert / Trajet</option>
-        <option value="airport">Aéroport</option>
-        <option value="hourly">Mise à disposition</option>
-        <option value="event">Événement</option>
+        ${getNicheServiceOptions(site.niche)}
       </select>
     </div>
     <div class="field-group">
       <div class="field-label">Adresse de prise en charge</div>
-      <input type="text" class="b-input" id="bAddress" placeholder="Ex: 10 rue de Rivoli, Paris">
+      <div class="addr-wrap">
+        <input type="text" class="b-input" id="bAddress" placeholder="Ex: 10 rue de Rivoli, Paris" autocomplete="off">
+        <div class="addr-suggestions" id="addrSuggest1"></div>
+      </div>
+    </div>
+    <div class="field-group">
+      <div class="field-label">Destination</div>
+      <div class="addr-wrap">
+        <input type="text" class="b-input" id="bDest" placeholder="Ex: Aéroport CDG, Terminal 2" autocomplete="off">
+        <div class="addr-suggestions" id="addrSuggest2"></div>
+      </div>
+    </div>
+    <div id="priceEstimate" style="display:none;background:rgba(140,82,255,0.1);border:1px solid rgba(140,82,255,0.3);border-radius:14px;padding:16px;margin-bottom:14px;text-align:center">
+      <div style="font-size:12px;color:var(--c-muted);text-transform:uppercase;letter-spacing:0.8px;margin-bottom:6px">Tarif estimé · Prix fixe</div>
+      <div id="priceValue" style="font-size:32px;font-weight:800;color:var(--c-primary);margin-bottom:4px"></div>
+      <div id="priceDetail" style="font-size:12px;color:var(--c-muted)"></div>
     </div>
     <div class="field-row">
       <div class="field-group">
@@ -910,6 +1310,24 @@ ${site.photo_url ? `<meta name="twitter:image" content="${site.photo_url}">` : '
 
 <!-- ═══ 5. TARIFS ═══ -->
 ${pricingHtml}
+
+<!-- ═══ 5b. CODE PROMO ═══ -->
+${
+  promoCode && promoPercent > 0
+    ? `
+<div class="card" style="border-color:rgba(245,158,11,0.3);background:rgba(245,158,11,0.06)">
+  <div style="text-align:center">
+    <div style="font-size:13px;font-weight:600;color:#F59E0B;text-transform:uppercase;letter-spacing:1px;margin-bottom:10px">🎁 Offre 1ère réservation</div>
+    <div style="font-size:36px;font-weight:800;color:#F59E0B;margin-bottom:4px">-${promoPercent}%</div>
+    <div style="display:inline-block;background:rgba(0,0,0,0.3);border:2px dashed rgba(245,158,11,0.5);border-radius:10px;padding:10px 24px;margin:8px 0">
+      <span style="font-size:20px;font-weight:800;color:#fff;letter-spacing:3px;font-family:monospace">${promoCode}</span>
+    </div>
+    <div style="font-size:12px;color:var(--c-muted);margin-top:8px">Mentionnez ce code lors de votre réservation · Valable 1 fois</div>
+  </div>
+</div>
+`
+    : ''
+}
 
 <!-- ═══ 6. CTA SECONDAIRE ═══ -->
 <button class="cta-secondary" onclick="document.getElementById('bookingSection').scrollIntoView({behavior:'smooth'})">
@@ -972,6 +1390,125 @@ ${pricingHtml}
   var selectedAmount = 0;
   var selectedRating = 0;
 
+  // ── PRICE CALCULATOR ──
+  var PRICING = ${pricing ? JSON.stringify(pricing) : 'null'};
+  var PROMO_PERCENT = ${promoPercent};
+  var calcTimeout = null;
+
+  function debounce(fn, ms) { return function() { clearTimeout(calcTimeout); calcTimeout = setTimeout(fn, ms); }; }
+
+  var tryCalcPrice = debounce(function() {
+    var from = document.getElementById('bAddress').value.trim();
+    var to = document.getElementById('bDest') ? document.getElementById('bDest').value.trim() : '';
+    if (!from || !to || !PRICING) { document.getElementById('priceEstimate').style.display = 'none'; return; }
+    Promise.all([geocode(from), geocode(to)]).then(function(coords) {
+      if (!coords[0] || !coords[1]) { document.getElementById('priceEstimate').style.display = 'none'; return; }
+      var dist = haversine(coords[0][0], coords[0][1], coords[1][0], coords[1][1]);
+      var roadDist = dist * 1.3; // route factor
+      var fare = Math.max(PRICING.minimumFare || 15, PRICING.baseRate + PRICING.perKmRate * roadDist);
+      var el = document.getElementById('priceEstimate');
+      var valEl = document.getElementById('priceValue');
+      var detEl = document.getElementById('priceDetail');
+      valEl.textContent = Math.round(fare) + ' \u20AC';
+      detEl.textContent = roadDist.toFixed(1) + ' km \u00B7 Prix fixe garanti';
+      if (PROMO_PERCENT > 0) {
+        var discounted = Math.round(fare * (1 - PROMO_PERCENT / 100));
+        valEl.innerHTML = '<span style="text-decoration:line-through;color:var(--c-muted);font-size:18px;margin-right:8px">' + Math.round(fare) + '\u20AC</span>' + discounted + ' \u20AC';
+        detEl.textContent = roadDist.toFixed(1) + ' km \u00B7 -' + PROMO_PERCENT + '% 1\u00E8re course';
+      }
+      el.style.display = 'block';
+    }).catch(function() { document.getElementById('priceEstimate').style.display = 'none'; });
+  }, 600);
+
+  function geocode(addr) {
+    return fetch('https://api-adresse.data.gouv.fr/search/?q=' + encodeURIComponent(addr) + '&limit=1')
+      .then(function(r) { return r.json(); })
+      .then(function(d) { return d.features && d.features.length ? [d.features[0].geometry.coordinates[1], d.features[0].geometry.coordinates[0]] : null; })
+      .catch(function() { return null; });
+  }
+
+  function haversine(lat1, lon1, lat2, lon2) {
+    var R = 6371;
+    var dLat = (lat2 - lat1) * Math.PI / 180;
+    var dLon = (lon2 - lon1) * Math.PI / 180;
+    var a = Math.sin(dLat/2) * Math.sin(dLat/2) + Math.cos(lat1*Math.PI/180) * Math.cos(lat2*Math.PI/180) * Math.sin(dLon/2) * Math.sin(dLon/2);
+    return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
+  }
+
+  // Bind input events for price calculator
+  if (document.getElementById('bAddress')) {
+    document.getElementById('bAddress').addEventListener('input', tryCalcPrice);
+    if (document.getElementById('bDest')) document.getElementById('bDest').addEventListener('input', tryCalcPrice);
+  }
+
+  // ── ADDRESS AUTOCOMPLETE (API Adresse gouv.fr — 100% gratuit, sans clé) ──
+  function setupAddrAutocomplete(inputId, suggestId) {
+    var input = document.getElementById(inputId);
+    var list = document.getElementById(suggestId);
+    if (!input || !list) return;
+    var timer = null;
+
+    input.addEventListener('input', function() {
+      clearTimeout(timer);
+      var q = input.value.trim();
+      if (q.length < 3) { list.classList.remove('open'); list.innerHTML = ''; return; }
+      timer = setTimeout(function() {
+        fetch('https://api-adresse.data.gouv.fr/search/?q=' + encodeURIComponent(q) + '&limit=5&type=housenumber&type=street')
+          .then(function(r) { return r.json(); })
+          .then(function(data) {
+            list.innerHTML = '';
+            if (!data.features || data.features.length === 0) { list.classList.remove('open'); return; }
+            data.features.forEach(function(f) {
+              var p = f.properties;
+              var div = document.createElement('div');
+              div.className = 'addr-item';
+              div.innerHTML = p.name + '<div class="addr-city">' + p.postcode + ' ' + p.city + '</div>';
+              div.addEventListener('click', function() {
+                input.value = p.label;
+                list.classList.remove('open');
+                list.innerHTML = '';
+                tryCalcPrice();
+              });
+              list.appendChild(div);
+            });
+            list.classList.add('open');
+          })
+          .catch(function() { list.classList.remove('open'); });
+      }, 280);
+    });
+
+    // Close dropdown on outside click
+    document.addEventListener('click', function(e) {
+      if (!e.target.closest('.addr-wrap')) { list.classList.remove('open'); list.innerHTML = ''; }
+    });
+
+    // Keyboard navigation
+    input.addEventListener('keydown', function(e) {
+      var items = list.querySelectorAll('.addr-item');
+      if (!items.length) return;
+      var active = list.querySelector('.addr-item:focus');
+      if (e.key === 'ArrowDown') {
+        e.preventDefault();
+        if (!active) items[0].focus();
+        else if (active.nextElementSibling) active.nextElementSibling.focus();
+      } else if (e.key === 'ArrowUp') {
+        e.preventDefault();
+        if (active && active.previousElementSibling) active.previousElementSibling.focus();
+        else input.focus();
+      } else if (e.key === 'Enter' && active) {
+        e.preventDefault();
+        active.click();
+      } else if (e.key === 'Escape') {
+        list.classList.remove('open');
+        list.innerHTML = '';
+      }
+    });
+  }
+
+  // Init autocomplete on both address fields
+  setupAddrAutocomplete('bAddress', 'addrSuggest1');
+  setupAddrAutocomplete('bDest', 'addrSuggest2');
+
   // Track view
   fetch(BACKEND + '/api/driver-site/view/' + SLUG, {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({source:'${source}'})}).catch(function(){});
 
@@ -1016,6 +1553,7 @@ ${pricingHtml}
         passenger_phone: phone,
         passenger_email: document.getElementById('bEmail').value,
         notes: document.getElementById('bNotes').value,
+        destination: document.getElementById('bDest') ? document.getElementById('bDest').value : '',
         source: '${source}'
       })
     }).then(function(r){return r.json()}).then(function(data) {
@@ -1150,7 +1688,15 @@ app.get('/c/:slug', async (req: any, res: any) => {
     }
     res.setHeader('Content-Type', 'text/html; charset=utf-8');
     res.setHeader('Cache-Control', 'public, max-age=60, stale-while-revalidate=300');
-    return res.send(renderDriverPage(site, source));
+    const bUrl =
+      process.env.BACKEND_URL || 'https://foreas-stripe-backend-production.up.railway.app';
+    return res.send(
+      renderDriverPageV3(site, source, {
+        backendUrl: bUrl,
+        stripePublishableKey: process.env.STRIPE_PUBLISHABLE_KEY || undefined,
+        mapboxToken: process.env.MAPBOX_ACCESS_TOKEN || undefined,
+      }),
+    );
   } catch (err: any) {
     console.error('[DriverSite] render error:', err.message);
     return res.status(500).send('<p>Erreur serveur</p>');
@@ -1173,6 +1719,7 @@ app.post('/api/driver-site/generate', async (req: any, res: any) => {
     niche,
     niche_label,
     pricing,
+    promo_discount_percent,
   } = req.body || {};
   if (!driver_id || !display_name)
     return res.status(400).json({ error: 'driver_id + display_name requis' });
@@ -1193,12 +1740,12 @@ app.post('/api/driver-site/generate', async (req: any, res: any) => {
         rating || 5.0,
         total_trips || 0,
         languages || ['Français'],
+        niche,
       );
     const siteData: Record<string, any> = {
       driver_id,
       slug,
       display_name,
-      photo_url: photo_url || null,
       bio: generatedBio,
       languages: languages || ['Français'],
       vehicle_type: vehicle_type || null,
@@ -1209,22 +1756,63 @@ app.post('/api/driver-site/generate', async (req: any, res: any) => {
       is_active: true,
       updated_at: new Date().toISOString(),
     };
-    // Add optional enriched fields if provided
+    // Add optional enriched fields if provided (don't overwrite existing values)
+    if (photo_url) siteData.photo_url = photo_url;
     if (niche) siteData.niche = niche;
     if (niche_label) siteData.niche_label = niche_label;
     if (pricing) siteData.pricing = pricing;
+    if (promo_discount_percent != null) siteData.promo_discount_percent = promo_discount_percent;
+
+    // Promo code: ALWAYS auto-generate if missing (new OR existing without code)
+    let isNewPromoCode = false;
+    if (!existing) {
+      siteData.promo_code = generatePromoCode(display_name);
+      isNewPromoCode = true;
+    } else {
+      // Check if existing site has a promo code
+      const { data: existingSite } = await supa
+        .from('driver_sites')
+        .select('promo_code')
+        .eq('id', existing.id)
+        .single();
+      if (!existingSite?.promo_code) {
+        siteData.promo_code = generatePromoCode(display_name);
+        isNewPromoCode = true;
+      }
+    }
 
     const { data, error } = existing
       ? await supa.from('driver_sites').update(siteData).eq('id', existing.id).select().single()
       : await supa.from('driver_sites').insert(siteData).select().single();
     if (error) throw new Error(error.message);
-    const backendUrl =
+    const siteBaseUrl =
       process.env.BACKEND_URL || 'https://foreas-stripe-backend-production.up.railway.app';
+    const publicUrl = `${siteBaseUrl}/c/${data.slug}`;
+
+    // Send promo code email to driver (async, non-blocking)
+    if (isNewPromoCode && data.promo_code) {
+      // Fetch driver email from drivers table
+      const { data: driver } = await supa
+        .from('drivers')
+        .select('email')
+        .eq('id', driver_id)
+        .single();
+      if (driver?.email) {
+        sendPromoCodeEmail(
+          driver.email,
+          display_name,
+          data.promo_code,
+          data.promo_discount_percent || 10,
+          publicUrl,
+        ).catch((e: any) => console.error('[PromoEmail] bg error:', e.message));
+      }
+    }
+
     return res.json({
       success: true,
       site: data,
-      public_url: `${backendUrl}/c/${data.slug}`,
-      qr_data: `${backendUrl}/c/${data.slug}?src=qr`,
+      public_url: publicUrl,
+      qr_data: `${publicUrl}?src=qr`,
     });
   } catch (err: any) {
     console.error('[DriverSite] generate error:', err.message);
@@ -1242,14 +1830,14 @@ app.get('/api/driver-site/mine/:driverId', async (req: any, res: any) => {
       .select('*')
       .eq('driver_id', driverId)
       .single();
-    const backendUrl =
+    const siteBaseUrl =
       process.env.BACKEND_URL || 'https://foreas-stripe-backend-production.up.railway.app';
     if (!site) return res.json({ exists: false });
     return res.json({
       exists: true,
       site,
-      public_url: `${backendUrl}/c/${site.slug}`,
-      qr_data: `${backendUrl}/c/${site.slug}?src=qr`,
+      public_url: `${siteBaseUrl}/c/${site.slug}`,
+      qr_data: `${siteBaseUrl}/c/${site.slug}?src=qr`,
     });
   } catch (err: any) {
     return res.status(500).json({ error: err.message });
@@ -1352,6 +1940,117 @@ app.post('/api/driver-site/review', async (req: any, res: any) => {
   }
 });
 
+// ── POST /api/bookings/upload-photo — Upload photo chauffeur → Supabase Storage ──
+app.post('/api/bookings/upload-photo', async (req: any, res: any) => {
+  const { driverId, base64, mimeType } = req.body || {};
+  if (!driverId || !base64) {
+    return res.status(400).json({ error: 'driverId + base64 requis' });
+  }
+
+  try {
+    const supa = await getSupabaseAdmin();
+    const ext = (mimeType || 'image/jpeg').includes('png') ? 'png' : 'jpg';
+    const filePath = `${driverId}/photo-${Date.now()}.${ext}`;
+
+    // Decode base64 to Buffer
+    const buffer = Buffer.from(base64, 'base64');
+
+    // Upload to Supabase Storage (bucket must exist + be public)
+    const { error: uploadError } = await supa.storage
+      .from('driver-site-photos')
+      .upload(filePath, buffer, {
+        contentType: mimeType || 'image/jpeg',
+        upsert: true,
+      });
+
+    if (uploadError) {
+      console.error('[Photo Upload] Storage error:', uploadError.message);
+      return res.status(500).json({ error: uploadError.message });
+    }
+
+    // Get public URL
+    const { data: urlData } = supa.storage.from('driver-site-photos').getPublicUrl(filePath);
+
+    const publicUrl = urlData?.publicUrl;
+    console.log('[Photo Upload] ✅ Uploaded:', publicUrl);
+
+    // Also update driver_sites if the driver already has a site
+    const { data: site } = await supa
+      .from('driver_sites')
+      .select('id')
+      .eq('driver_id', driverId)
+      .single();
+
+    if (site) {
+      await supa
+        .from('driver_sites')
+        .update({ photo_url: publicUrl, updated_at: new Date().toISOString() })
+        .eq('id', site.id);
+      console.log('[Photo Upload] ✅ Updated driver_sites.photo_url for site', site.id);
+    }
+
+    return res.json({ success: true, publicUrl });
+  } catch (err: any) {
+    console.error('[Photo Upload] Error:', err.message);
+    return res.status(500).json({ error: err.message });
+  }
+});
+
+// ── POST /api/driver-site/create-payment-intent — PaymentIntent pour réservation ──
+app.post('/api/driver-site/create-payment-intent', async (req: any, res: any) => {
+  const { slug, amount, pickup_address, destination, booking_date, booking_time } = req.body || {};
+  if (!slug || !amount || amount < 5) {
+    return res.status(400).json({ error: 'slug + amount (min 5€) requis' });
+  }
+  try {
+    const supa = await getSupabaseAdmin();
+    const { data: site } = await supa
+      .from('driver_sites')
+      .select('id,display_name,stripe_account_id,stripe_charges_enabled')
+      .eq('slug', slug)
+      .eq('is_active', true)
+      .single();
+    if (!site) return res.status(404).json({ error: 'Site introuvable' });
+    if (!site.stripe_account_id || !site.stripe_charges_enabled) {
+      return res
+        .status(400)
+        .json({ error: 'Chauffeur non connecté à Stripe', code: 'stripe_not_connected' });
+    }
+
+    const stripe = await getStripe();
+    const amountCents = Math.round(amount * 100);
+    const platformFeeCents = Math.round(amountCents * 0.12); // 12% FOREAS commission
+
+    const paymentIntent = await stripe.paymentIntents.create({
+      amount: amountCents,
+      currency: 'eur',
+      application_fee_amount: platformFeeCents,
+      transfer_data: { destination: site.stripe_account_id },
+      metadata: {
+        driver_site_id: site.id,
+        slug,
+        type: 'booking',
+        pickup: pickup_address || '',
+        dest: destination || '',
+        date: booking_date || '',
+        time: booking_time || '',
+      },
+      description: `Course ${site.display_name} — ${pickup_address || 'départ'} → ${destination || 'arrivée'}`,
+    });
+
+    return res.json({
+      client_secret: paymentIntent.client_secret,
+      payment_intent_id: paymentIntent.id,
+      amount: amount,
+      platform_fee: platformFeeCents / 100,
+      driver_net: (amountCents - platformFeeCents) / 100,
+    });
+  } catch (err: any) {
+    console.error('[DriverSite] create-payment-intent error:', err.message);
+    return res.status(500).json({ error: err.message });
+  }
+});
+
 // ── POST /api/driver-site/booking — Réservation passager (2 étapes) ──
 app.post('/api/driver-site/booking', async (req: any, res: any) => {
   const {
@@ -1365,6 +2064,9 @@ app.post('/api/driver-site/booking', async (req: any, res: any) => {
     passenger_email,
     notes,
     source,
+    destination,
+    estimated_fare,
+    payment_intent_id,
   } = req.body || {};
 
   if (!slug || !passenger_name || !passenger_phone) {
@@ -1382,21 +2084,27 @@ app.post('/api/driver-site/booking', async (req: any, res: any) => {
 
     if (!site) return res.status(404).json({ error: 'Site introuvable' });
 
+    const bookingData: Record<string, any> = {
+      driver_site_id: site.id,
+      slug,
+      service_type: service_type || 'transfer',
+      pickup_address: pickup_address || null,
+      booking_date: booking_date || null,
+      booking_time: booking_time || null,
+      passenger_name,
+      passenger_phone,
+      passenger_email: passenger_email || null,
+      notes: notes || null,
+      source: source || 'web',
+    };
+    // Enriched fields (v3.0)
+    if (destination) bookingData.destination = destination;
+    if (estimated_fare) bookingData.estimated_fare = estimated_fare;
+    if (payment_intent_id) bookingData.payment_intent_id = payment_intent_id;
+
     const { data, error } = await supa
       .from('driver_bookings')
-      .insert({
-        driver_site_id: site.id,
-        slug,
-        service_type: service_type || 'transfer',
-        pickup_address: pickup_address || null,
-        booking_date: booking_date || null,
-        booking_time: booking_time || null,
-        passenger_name,
-        passenger_phone,
-        passenger_email: passenger_email || null,
-        notes: notes || null,
-        source: source || 'web',
-      })
+      .insert(bookingData)
       .select()
       .single();
 
