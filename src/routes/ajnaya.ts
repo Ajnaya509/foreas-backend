@@ -386,7 +386,7 @@ router.post('/synthesize', async (req: Request, res: Response) => {
             body: JSON.stringify({
               text: cleanText,
               model_id: 'eleven_multilingual_v2',
-              voice_settings: getVoiceSettings(emotion),
+              voice_settings: { ...getVoiceSettings(emotion), speed: 1.15 },
             }),
           },
         );
@@ -714,7 +714,7 @@ async function handleSynthesis(text: string): Promise<{ audio: string | null; pr
           body: JSON.stringify({
             text: text.substring(0, 1000),
             model_id: 'eleven_multilingual_v2',
-            voice_settings: { stability: 0.5, similarity_boost: 0.75, style: 0.5 },
+            voice_settings: { stability: 0.5, similarity_boost: 0.75, style: 0.5, speed: 1.15 },
           }),
         },
       );
