@@ -426,16 +426,19 @@ setTimeout(() => {
 app.use('/create-checkout-session', express.json());
 app.post('/create-checkout-session', async (req, res) => {
   try {
-    const priceId = process.env.STRIPE_PRICE_ID;
-    if (!priceId) {
-      return res.status(400).json({ error: 'Missing STRIPE_PRICE_ID' });
-    }
-
-    const { email, phone, driverId } = req.body as {
+    const { email, phone, driverId, plan } = req.body as {
       email?: string;
       phone?: string;
       driverId?: string;
+      plan?: 'weekly' | 'annual';
     };
+
+    const priceId =
+      plan === 'annual' ? process.env.STRIPE_PRICE_ID_ANNUAL : process.env.STRIPE_PRICE_ID;
+
+    if (!priceId) {
+      return res.status(400).json({ error: `Missing price for plan: ${plan || 'weekly'}` });
+    }
 
     if (!email) {
       return res.status(400).json({ error: 'email requis pour créer un abonnement' });
