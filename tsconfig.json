@@ -10,19 +10,18 @@
     "skipLibCheck": true,
     "resolveJsonModule": true
   },
-  "include": ["src/index.ts", "src/helpers/**/*", "src/routes/**/*"],
-  "exclude": [
-    "src/__tests__",
-    "src/app",
-    "src/lib",
-    "src/server",
-    "src/tests",
-    "src/webhooks",
-    "src/services",
-    "src/middleware",
-    "src/utils",
-    "src/config",
-    "src/demo",
-    "src/env.ts"
-  ]
+  "include": [
+    "src/index.ts",
+    "src/helpers/**/*",
+    "src/routes/**/*",
+    "src/services/supa.ts",
+    "src/services/email.ts",
+    "src/middleware/rbac.ts",
+    "src/middleware/rateLimit.middleware.ts",
+    "src/middleware/validation.middleware.ts",
+    "src/data/**/*",
+    "src/ai/**/*",
+    "src/jobs/**/*"
+  ],
+  "exclude": ["src/__tests__", "src/tests"]
 }

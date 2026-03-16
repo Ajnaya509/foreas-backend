@@ -1,14 +1,15 @@
 /**
- * Driver Site Template — FOREAS v3.0
+ * Driver Site Template — FOREAS v4.0
  * ═══════════════════════════════════
  * Template HTML client-facing pour les sites chauffeurs.
- * Flow booking 2 étapes:
- *   Step 1: Départ + Arrivée + Date/Heure → Prix instantané → "J'accepte — Réserver"
- *   Step 2: Animation tracé route (cyan→violet→cyan) + Paiement Stripe Elements inline
+ * Flow booking 2 etapes:
+ *   Step 1: Depart + Arrivee + Date/Heure -> Prix instantane -> "J'accepte -- Reserver"
+ *   Step 2: Mapbox GL JS route map + Email/Phone + Confirmer
  *
- * Mobile-first, ultra-responsive, conversion-optimisé.
- * Aucune dépendance JS lourde (pas de React, pas de Mapbox GL JS).
- * Stripe.js chargé uniquement si le chauffeur a un compte Connect.
+ * ONE-PAGE, ultra-compact, Blacklane/Uber-level dark design.
+ * Mobile-first, zero scroll marathon.
+ * Mapbox GL JS v3 pour la carte route animee.
+ * Stripe.js charge uniquement si le chauffeur a un compte Connect.
  */
 
 // ─── Helper: service options par niche ─────────────────────────────────────
@@ -80,7 +81,7 @@ export function renderDriverPage(
   const { backendUrl, stripePublishableKey, mapboxToken } = options;
   const rating = site.rating || 5;
   const stars = '★'.repeat(Math.round(rating)) + '☆'.repeat(5 - Math.round(rating));
-  const siteUrl = `${backendUrl}/c/${site.slug}`;
+  const siteUrl = `https://foreas.xyz/c/${site.slug}`;
   const themeColor = site.theme_color || '#8C52FF';
   const displayName = site.display_name || 'Chauffeur';
   const firstName = displayName.split(' ')[0];
@@ -110,15 +111,14 @@ export function renderDriverPage(
   const promoPercent = site.promo_discount_percent || 0;
   const hasStripe = !!site.stripe_account_id && !!site.stripe_charges_enabled;
   const canAcceptPayment = hasStripe && !!stripePublishableKey;
-  const tripsLabel = totalTrips > 100 ? `${totalTrips}+` : totalTrips > 0 ? `${totalTrips}` : '—';
+  const tripsLabel = totalTrips > 100 ? `${totalTrips}+` : totalTrips > 0 ? `${totalTrips}` : '--';
 
   // JSON-LD structured data
   const jsonLd = {
     '@context': 'https://schema.org',
-    '@type': 'LocalBusiness',
-    additionalType: 'https://schema.org/TaxiService',
-    name: `${displayName} — ${vehicleType}`,
-    description: bio.substring(0, 300),
+    '@type': 'TaxiService',
+    name: `${displayName} - Chauffeur VTC`,
+    description: `Réservez votre chauffeur privé ${displayName} à ${city}. Transferts, mise à disposition, tours privés. Réservation instantanée.`,
     url: siteUrl,
     ...(site.photo_url ? { image: site.photo_url } : {}),
     address: { '@type': 'PostalAddress', addressLocality: city, addressCountry: 'FR' },
@@ -132,30 +132,33 @@ export function renderDriverPage(
           },
         }
       : {}),
-    priceRange: '€€',
+    priceRange: '$$',
     knowsLanguage: languages,
     areaServed: { '@type': 'City', name: city },
-    potentialAction: [
-      {
-        '@type': 'ReserveAction',
-        target: {
-          '@type': 'EntryPoint',
-          urlTemplate: siteUrl,
-          actionPlatform: [
-            'http://schema.org/DesktopWebPlatform',
-            'http://schema.org/MobileWebPlatform',
-          ],
-        },
-        name: 'Réserver une course',
+    provider: {
+      '@type': 'LocalBusiness',
+      name: `${displayName} VTC`,
+      priceRange: '$$',
+    },
+    potentialAction: {
+      '@type': 'ReserveAction',
+      target: {
+        '@type': 'EntryPoint',
+        urlTemplate: siteUrl,
+        actionPlatform: [
+          'http://schema.org/DesktopWebPlatform',
+          'http://schema.org/MobileWebPlatform',
+        ],
       },
-    ],
+      name: 'Réserver une course',
+    },
   };
 
   const breadcrumbLd = {
     '@context': 'https://schema.org',
     '@type': 'BreadcrumbList',
     itemListElement: [
-      { '@type': 'ListItem', position: 1, name: 'FOREAS', item: 'https://foreas.app' },
+      { '@type': 'ListItem', position: 1, name: 'FOREAS', item: 'https://foreas.xyz' },
       {
         '@type': 'ListItem',
         position: 2,
@@ -166,51 +169,24 @@ export function renderDriverPage(
     ],
   };
 
-  // Pricing grid
-  let pricingHtml = '';
-  if (pricing && typeof pricing === 'object') {
-    const labels: Record<string, string> = {
-      baseRate: 'Prise en charge',
-      perKmRate: 'Par km',
-      waitingRate: 'Attente/min',
-      minimumFare: 'Minimum',
-    };
-    const units: Record<string, string> = {
-      baseRate: '€',
-      perKmRate: '€/km',
-      waitingRate: '€/min',
-      minimumFare: '€',
-    };
-    const entries = Object.entries(pricing).filter(([, v]) => v && Number(v) > 0);
-    if (entries.length > 0) {
-      pricingHtml = `
-<div class="card">
-  <div class="section-title">Tarifs</div>
-  <div class="pricing-grid">
-    ${entries.map(([k, v]) => `<div class="pricing-item"><span class="pricing-label">${labels[k] || k}</span><span class="pricing-price">${v}${units[k] ? units[k].replace('€', '') : ''}€</span></div>`).join('')}
-  </div>
-</div>`;
-    }
-  }
-
   return `<!DOCTYPE html>
 <html lang="fr" prefix="og: https://ogp.me/ns#">
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=5.0, user-scalable=yes">
-<title>${displayName} — ${vehicleType} ${city} | FOREAS</title>
+<title>${displayName} | Chauffeur VTC ${city} - Réservation en ligne</title>
 
 <!-- SEO -->
-<meta name="description" content="${metaDescription}">
+<meta name="description" content="Réservez ${displayName}, chauffeur privé à ${city}. Transferts, mise à disposition, tours privés. Réservation instantanée.">
 <meta name="robots" content="index, follow, max-image-preview:large">
 <link rel="canonical" href="${siteUrl}">
 <meta name="theme-color" content="#0a0a0f">
 <meta name="author" content="${displayName}">
 
 <!-- OG -->
-<meta property="og:type" content="profile">
-<meta property="og:title" content="${displayName} — ${vehicleType} ${city}">
-<meta property="og:description" content="${metaDescription}">
+<meta property="og:type" content="website">
+<meta property="og:title" content="${displayName} - Chauffeur Privé ${city}">
+<meta property="og:description" content="Réservez votre chauffeur privé. Réservation instantanée, prix fixe.">
 <meta property="og:url" content="${siteUrl}">
 ${
   site.photo_url
@@ -222,9 +198,9 @@ ${
 <meta property="og:site_name" content="FOREAS">
 
 <!-- Twitter -->
-<meta name="twitter:card" content="${site.photo_url ? 'summary_large_image' : 'summary'}">
-<meta name="twitter:title" content="${displayName} — ${vehicleType}">
-<meta name="twitter:description" content="${metaDescription}">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:title" content="${displayName} - Chauffeur VTC ${city}">
+<meta name="twitter:description" content="Réservez votre chauffeur privé. Prix fixe, réservation instantanée.">
 ${site.photo_url ? `<meta name="twitter:image" content="${site.photo_url}">` : ''}
 
 <!-- Geo SEO -->
@@ -242,10 +218,16 @@ ${site.photo_url ? `<meta name="twitter:image" content="${site.photo_url}">` : '
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800;900&display=swap" rel="stylesheet">
 ${canAcceptPayment ? '<script src="https://js.stripe.com/v3/"></script>' : ''}
+${
+  mapboxToken
+    ? `<link href="https://api.mapbox.com/mapbox-gl-js/v3.4.0/mapbox-gl.css" rel="stylesheet">
+<script src="https://api.mapbox.com/mapbox-gl-js/v3.4.0/mapbox-gl.js"></script>`
+    : ''
+}
 
 <style>
 /* ═══════════════════════════════════════════════════════════
-   FOREAS DRIVER SITE v3.0 — MOBILE-FIRST PREMIUM DESIGN
+   FOREAS DRIVER SITE v4.0 — ONE-PAGE PREMIUM DARK DESIGN
    ═══════════════════════════════════════════════════════════ */
 
 :root {
@@ -262,7 +244,7 @@ ${canAcceptPayment ? '<script src="https://js.stripe.com/v3/"></script>' : ''}
   --success: #22C55E;
   --amber: #F59E0B;
   --danger: #EF4444;
-  --radius: 20px;
+  --radius: 16px;
   --font: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
 }
 
@@ -273,137 +255,113 @@ body {
   color: var(--text);
   font-family: var(--font);
   min-height: 100vh;
+  min-height: 100dvh;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
   overflow-x: hidden;
 }
 
-.wrap { max-width: 480px; margin: 0 auto; padding-bottom: 100px; }
+.wrap { max-width: 480px; margin: 0 auto; padding-bottom: 80px; }
 
 /* ── ANIMATIONS ── */
-@keyframes fadeUp { from { opacity: 0; transform: translateY(20px); } to { opacity: 1; transform: translateY(0); } }
+@keyframes fadeUp { from { opacity: 0; transform: translateY(12px); } to { opacity: 1; transform: translateY(0); } }
 @keyframes fadeIn { from { opacity: 0; } to { opacity: 1; } }
-@keyframes slideLeft { from { opacity: 0; transform: translateX(40px); } to { opacity: 1; transform: translateX(0); } }
-@keyframes slideRight { from { opacity: 0; transform: translateX(-40px); } to { opacity: 1; transform: translateX(0); } }
-@keyframes pulse { 0%, 100% { transform: scale(1); } 50% { transform: scale(1.05); } }
+@keyframes slideLeft { from { opacity: 0; transform: translateX(30px); } to { opacity: 1; transform: translateX(0); } }
+@keyframes slideRight { from { opacity: 0; transform: translateX(-30px); } to { opacity: 1; transform: translateX(0); } }
 @keyframes shimmer { 0% { background-position: -200% 0; } 100% { background-position: 200% 0; } }
-@keyframes drawRoute {
-  0% { stroke-dashoffset: 1000; }
-  100% { stroke-dashoffset: 0; }
-}
-@keyframes dotPulse {
-  0%, 100% { r: 6; opacity: 1; }
-  50% { r: 9; opacity: 0.7; }
-}
-@keyframes floatBadge {
-  0%, 100% { transform: translateY(0); }
-  50% { transform: translateY(-3px); }
-}
-@keyframes scaleIn {
-  from { opacity: 0; transform: scale(0.85); }
-  to { opacity: 1; transform: scale(1); }
-}
-@keyframes confettiDrop {
-  0% { transform: translateY(-20px) rotate(0deg); opacity: 1; }
-  100% { transform: translateY(40px) rotate(360deg); opacity: 0; }
-}
-@keyframes priceReveal {
-  from { opacity: 0; transform: scale(0.7) translateY(10px); }
-  to { opacity: 1; transform: scale(1) translateY(0); }
-}
+@keyframes scaleIn { from { opacity: 0; transform: scale(0.92); } to { opacity: 1; transform: scale(1); } }
+@keyframes priceReveal { from { opacity: 0; transform: scale(0.8) translateY(8px); } to { opacity: 1; transform: scale(1) translateY(0); } }
+@keyframes routePulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.4; } }
 
-/* ── HERO ── */
+/* ── COMPACT HERO (max 140px) ── */
 .hero {
-  background: linear-gradient(165deg, var(--bg) 0%, #0d0825 40%, #0a0a1e 100%);
-  padding: 40px 20px 28px;
-  text-align: center;
+  background: linear-gradient(165deg, var(--bg) 0%, #0d0825 50%, var(--bg) 100%);
+  padding: 24px 20px 16px;
+  display: flex;
+  align-items: center;
+  gap: 16px;
   position: relative;
   overflow: hidden;
-  animation: fadeIn 0.6s ease;
-}
-.hero::before {
-  content: '';
-  position: absolute;
-  inset: 0;
-  background: radial-gradient(ellipse at 50% -20%, rgba(0,201,255,0.08) 0%, transparent 60%),
-              radial-gradient(ellipse at 30% 80%, rgba(140,82,255,0.06) 0%, transparent 50%);
-  pointer-events: none;
+  animation: fadeIn 0.5s ease;
 }
 .hero::after {
   content: '';
   position: absolute;
-  bottom: 0;
-  left: 0;
-  right: 0;
+  bottom: 0; left: 0; right: 0;
   height: 1px;
   background: linear-gradient(90deg, transparent, var(--cyan), var(--violet), var(--cyan), transparent);
-  opacity: 0.4;
+  opacity: 0.3;
 }
 
 .avatar {
-  width: 110px; height: 110px;
+  width: 72px; height: 72px;
   border-radius: 50%;
   object-fit: cover;
-  border: 3px solid transparent;
+  border: 2px solid transparent;
   background-image: linear-gradient(var(--bg2), var(--bg2)), linear-gradient(135deg, var(--cyan), var(--violet));
   background-origin: border-box;
   background-clip: content-box, border-box;
-  margin: 0 auto 14px;
-  display: block;
-  position: relative;
-  animation: fadeUp 0.5s ease 0.1s both;
+  flex-shrink: 0;
+  animation: fadeUp 0.4s ease 0.1s both;
 }
 .avatar-placeholder {
-  width: 110px; height: 110px;
+  width: 72px; height: 72px;
   border-radius: 50%;
   background: linear-gradient(135deg, var(--cyan), var(--violet));
-  margin: 0 auto 14px;
   display: flex;
   align-items: center;
   justify-content: center;
-  font-size: 40px;
+  font-size: 28px;
   font-weight: 900;
   color: #fff;
-  position: relative;
-  animation: fadeUp 0.5s ease 0.1s both;
+  flex-shrink: 0;
+  animation: fadeUp 0.4s ease 0.1s both;
 }
 
-h1 {
-  font-size: 28px;
-  font-weight: 800;
-  letter-spacing: -0.5px;
-  position: relative;
-  animation: fadeUp 0.5s ease 0.2s both;
-  margin-bottom: 4px;
-}
-.vehicle {
-  color: var(--muted);
-  font-size: 14px;
-  margin-bottom: 10px;
-  position: relative;
-  animation: fadeUp 0.5s ease 0.25s both;
-}
-.stars {
-  color: #FFD700;
+.hero-info { flex: 1; min-width: 0; animation: fadeUp 0.4s ease 0.15s both; }
+.hero-info h1 {
   font-size: 22px;
-  letter-spacing: 3px;
+  font-weight: 800;
+  letter-spacing: -0.3px;
   margin-bottom: 2px;
-  position: relative;
-  animation: fadeUp 0.5s ease 0.3s both;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
-.rating-text {
+.hero-sub {
   color: var(--muted);
   font-size: 13px;
-  margin-bottom: 20px;
-  position: relative;
-  animation: fadeUp 0.5s ease 0.35s both;
+  margin-bottom: 6px;
+}
+.hero-rating {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.hero-stars {
+  color: #FFD700;
+  font-size: 14px;
+  letter-spacing: 1px;
+}
+.hero-rating-text {
+  color: var(--muted);
+  font-size: 12px;
+}
+.hero-bio-line {
+  color: var(--subtle);
+  font-size: 11px;
+  margin-top: 4px;
+  display: -webkit-box;
+  -webkit-line-clamp: 1;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
 }
 
-/* ── TRUST BAR (enrichie) ── */
+/* ── TRUST BAR ── */
 .trust-row {
   display: flex;
-  gap: 8px;
-  padding: 16px 16px 0;
+  gap: 6px;
+  padding: 12px 16px;
   overflow-x: auto;
   -webkit-overflow-scrolling: touch;
   scrollbar-width: none;
@@ -411,64 +369,70 @@ h1 {
 .trust-row::-webkit-scrollbar { display: none; }
 .trust-badge {
   flex: 0 0 auto;
-  min-width: 80px;
   background: var(--card);
   border: 1px solid var(--card-border);
-  border-radius: 16px;
-  padding: 14px 12px;
-  text-align: center;
-  animation: fadeUp 0.4s ease calc(0.4s + var(--i, 0) * 0.08s) both;
-  transition: transform 0.2s, border-color 0.2s;
+  border-radius: 12px;
+  padding: 10px 14px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  animation: fadeUp 0.3s ease calc(0.3s + var(--i, 0) * 0.06s) both;
+  transition: border-color 0.2s;
 }
-.trust-badge:hover { transform: translateY(-2px); border-color: rgba(0,201,255,0.2); }
-.trust-icon { font-size: 22px; margin-bottom: 6px; }
-.trust-val { font-size: 15px; font-weight: 700; color: var(--text); }
-.trust-label { font-size: 10px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.6px; margin-top: 3px; }
+.trust-badge:hover { border-color: rgba(0,201,255,0.2); }
+.trust-icon {
+  width: 18px; height: 18px;
+  flex-shrink: 0;
+}
+.trust-icon svg { width: 18px; height: 18px; }
+.trust-text {
+  white-space: nowrap;
+}
+.trust-val { font-size: 13px; font-weight: 700; color: var(--text); line-height: 1; }
+.trust-label { font-size: 9px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.5px; }
 
 /* ── BOOKING MODULE ── */
 .booking {
   background: var(--card);
   border: 1px solid var(--card-border);
   border-radius: var(--radius);
-  margin: 16px;
-  padding: 24px 20px;
+  margin: 12px 16px;
+  padding: 20px 16px;
   position: relative;
   overflow: hidden;
-  animation: fadeUp 0.5s ease 0.5s both;
+  animation: fadeUp 0.4s ease 0.4s both;
 }
 .booking::before {
   content: '';
   position: absolute;
-  top: 0;
-  left: 0;
-  right: 0;
+  top: 0; left: 0; right: 0;
   height: 2px;
   background: linear-gradient(90deg, var(--cyan), var(--violet), var(--cyan));
   opacity: 0.5;
 }
 .booking-title {
-  font-size: 20px;
+  font-size: 18px;
   font-weight: 800;
   color: var(--text);
-  margin-bottom: 4px;
+  margin-bottom: 2px;
   letter-spacing: -0.3px;
 }
 .booking-sub {
-  font-size: 13px;
+  font-size: 12px;
   color: var(--muted);
-  margin-bottom: 20px;
+  margin-bottom: 16px;
 }
 
 /* Progress bar */
 .booking-progress {
   display: flex;
-  gap: 8px;
-  margin-bottom: 22px;
+  gap: 6px;
+  margin-bottom: 18px;
 }
 .booking-step-dot {
   flex: 1;
-  height: 4px;
-  border-radius: 4px;
+  height: 3px;
+  border-radius: 3px;
   background: rgba(255,255,255,0.08);
   transition: background 0.5s ease;
   position: relative;
@@ -488,36 +452,36 @@ h1 {
 
 /* Steps */
 .booking-step { display: none; }
-.booking-step.visible { display: block; animation: slideLeft 0.4s ease; }
-.booking-step.visible-back { display: block; animation: slideRight 0.4s ease; }
+.booking-step.visible { display: block; animation: slideLeft 0.35s ease; }
+.booking-step.visible-back { display: block; animation: slideRight 0.35s ease; }
 
 /* Form elements */
 .field-label {
-  font-size: 11px;
+  font-size: 10px;
   font-weight: 700;
   color: var(--muted);
   text-transform: uppercase;
-  letter-spacing: 1px;
-  margin-bottom: 8px;
+  letter-spacing: 0.8px;
+  margin-bottom: 6px;
   display: flex;
   align-items: center;
   gap: 6px;
 }
-.field-label .icon { font-size: 14px; }
-.field-group { margin-bottom: 16px; }
-.field-row { display: flex; gap: 12px; }
+.field-label svg { width: 14px; height: 14px; flex-shrink: 0; }
+.field-group { margin-bottom: 12px; }
+.field-row { display: flex; gap: 10px; }
 .field-row > * { flex: 1; }
 
 .b-input {
   width: 100%;
   background: rgba(255,255,255,0.04);
   border: 1.5px solid rgba(255,255,255,0.1);
-  border-radius: 14px;
-  padding: 15px 16px;
-  font-size: 16px;
+  border-radius: 12px;
+  padding: 13px 14px;
+  font-size: 15px;
   color: #fff;
   font-family: var(--font);
-  min-height: 52px;
+  min-height: 48px;
   transition: border-color 0.25s, box-shadow 0.25s, background 0.25s;
   -webkit-appearance: none;
   appearance: none;
@@ -525,121 +489,120 @@ h1 {
 .b-input:focus {
   outline: none;
   border-color: var(--cyan);
-  box-shadow: 0 0 0 3px rgba(0,201,255,0.12);
-  background: rgba(0,201,255,0.03);
+  box-shadow: 0 0 0 3px rgba(0,201,255,0.1);
+  background: rgba(0,201,255,0.02);
 }
-.b-input::placeholder { color: #444455; }
+.b-input::placeholder { color: #3a3a4a; }
 select.b-input {
   background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12'%3E%3Cpath fill='%23666' d='M6 8L1 3h10z'/%3E%3C/svg%3E");
   background-repeat: no-repeat;
-  background-position: right 16px center;
-  padding-right: 40px;
+  background-position: right 14px center;
+  padding-right: 36px;
 }
 select.b-input option { background: #1a1a2e; color: #fff; }
 
 /* ── PRICE ESTIMATE ── */
 .price-estimate {
   display: none;
-  border-radius: 18px;
-  padding: 20px;
-  margin-bottom: 18px;
+  border-radius: 14px;
+  padding: 16px;
+  margin-bottom: 14px;
   text-align: center;
   position: relative;
   overflow: hidden;
-  animation: priceReveal 0.5s cubic-bezier(0.34, 1.56, 0.64, 1) both;
+  animation: priceReveal 0.4s cubic-bezier(0.34, 1.56, 0.64, 1) both;
 }
 .price-estimate.visible { display: block; }
 .price-estimate-bg {
   position: absolute;
   inset: 0;
-  background: linear-gradient(135deg, rgba(0,201,255,0.08), rgba(140,82,255,0.08));
-  border: 1.5px solid rgba(0,201,255,0.2);
-  border-radius: 18px;
+  background: linear-gradient(135deg, rgba(0,201,255,0.06), rgba(140,82,255,0.06));
+  border: 1.5px solid rgba(0,201,255,0.15);
+  border-radius: 14px;
 }
 .price-label {
-  font-size: 10px;
+  font-size: 9px;
   font-weight: 700;
   color: var(--cyan);
   text-transform: uppercase;
   letter-spacing: 1.5px;
-  margin-bottom: 8px;
+  margin-bottom: 6px;
   position: relative;
 }
 .price-value {
-  font-size: 42px;
+  font-size: 38px;
   font-weight: 900;
   background: linear-gradient(135deg, var(--cyan), var(--violet));
   -webkit-background-clip: text;
   -webkit-text-fill-color: transparent;
   background-clip: text;
-  margin-bottom: 4px;
+  margin-bottom: 2px;
   position: relative;
   line-height: 1.1;
 }
 .price-original {
   text-decoration: line-through;
   color: var(--muted);
-  font-size: 18px;
+  font-size: 16px;
   font-weight: 600;
-  margin-right: 8px;
+  margin-right: 6px;
 }
 .price-detail {
-  font-size: 12px;
+  font-size: 11px;
   color: var(--muted);
   position: relative;
 }
 .price-promo-badge {
   display: inline-block;
-  background: linear-gradient(135deg, rgba(245,158,11,0.15), rgba(245,158,11,0.08));
-  border: 1px solid rgba(245,158,11,0.3);
-  border-radius: 20px;
-  padding: 4px 12px;
-  font-size: 12px;
+  background: linear-gradient(135deg, rgba(245,158,11,0.12), rgba(245,158,11,0.06));
+  border: 1px solid rgba(245,158,11,0.25);
+  border-radius: 16px;
+  padding: 3px 10px;
+  font-size: 11px;
   font-weight: 700;
   color: var(--amber);
-  margin-top: 8px;
-  animation: floatBadge 3s ease infinite;
+  margin-top: 6px;
 }
 
 /* ── CTA BUTTONS ── */
 .cta-accept {
   width: 100%;
   border: none;
-  border-radius: 16px;
-  padding: 18px;
-  font-size: 17px;
+  border-radius: 14px;
+  padding: 16px;
+  font-size: 16px;
   font-weight: 800;
   color: #fff;
   cursor: pointer;
   font-family: var(--font);
-  min-height: 58px;
+  min-height: 52px;
   position: relative;
   overflow: hidden;
   transition: transform 0.15s, box-shadow 0.15s;
   background: linear-gradient(135deg, var(--cyan) 0%, #0BB8E8 30%, var(--violet) 70%, var(--cyan) 100%);
   background-size: 300% 100%;
   animation: shimmer 4s ease infinite;
-  box-shadow: 0 6px 24px rgba(0,201,255,0.25);
+  box-shadow: 0 4px 20px rgba(0,201,255,0.2);
   letter-spacing: 0.3px;
-  margin-top: 6px;
+  margin-top: 4px;
 }
-.cta-accept:hover { transform: translateY(-1px); box-shadow: 0 8px 28px rgba(0,201,255,0.35); }
+.cta-accept:hover { transform: translateY(-1px); box-shadow: 0 6px 24px rgba(0,201,255,0.3); }
 .cta-accept:active { transform: scale(0.98); }
-.cta-accept:disabled { opacity: 0.45; cursor: not-allowed; transform: none; box-shadow: none; animation: none; }
+.cta-accept:disabled { opacity: 0.4; cursor: not-allowed; transform: none; box-shadow: none; animation: none; }
 
 .cta-pay {
   width: 100%;
   border: none;
-  border-radius: 16px;
-  padding: 18px;
-  font-size: 17px;
+  border-radius: 14px;
+  padding: 16px;
+  font-size: 16px;
   font-weight: 800;
   color: #fff;
   cursor: pointer;
   font-family: var(--font);
-  min-height: 58px;
+  min-height: 52px;
   background: linear-gradient(135deg, var(--cyan), var(--violet));
-  box-shadow: 0 6px 24px rgba(140,82,255,0.3);
+  box-shadow: 0 4px 20px rgba(140,82,255,0.25);
   transition: all 0.2s;
   letter-spacing: 0.3px;
 }
@@ -651,153 +614,128 @@ select.b-input option { background: #1a1a2e; color: #fff; }
   background: none;
   border: none;
   color: var(--muted);
-  font-size: 13px;
+  font-size: 12px;
   cursor: pointer;
-  padding: 12px;
-  margin-top: 8px;
+  padding: 10px;
+  margin-top: 6px;
   font-family: var(--font);
   text-decoration: none;
   display: flex;
   align-items: center;
   justify-content: center;
-  gap: 6px;
+  gap: 4px;
   transition: color 0.2s;
 }
 .booking-back:hover { color: var(--cyan); }
 
-/* ── ROUTE ANIMATION (Step 2) ── */
-.route-card {
-  background: linear-gradient(160deg, #0a0a1e, #0d0825, #0a0a1e);
-  border: 1px solid rgba(0,201,255,0.12);
-  border-radius: 20px;
-  padding: 24px 20px;
-  margin-bottom: 20px;
-  position: relative;
+/* ── MAPBOX MAP ── */
+.map-container {
+  display: none;
+  border-radius: 14px;
   overflow: hidden;
-  animation: scaleIn 0.5s ease both;
-}
-.route-card::before {
-  content: '';
-  position: absolute;
-  inset: 0;
-  background: radial-gradient(ellipse at 30% 30%, rgba(0,201,255,0.04) 0%, transparent 60%),
-              radial-gradient(ellipse at 70% 70%, rgba(140,82,255,0.04) 0%, transparent 60%);
-  pointer-events: none;
-}
-.route-svg-container {
-  width: 100%;
-  height: 120px;
+  margin-bottom: 14px;
+  border: 1px solid rgba(0,201,255,0.12);
+  animation: scaleIn 0.4s ease both;
   position: relative;
-  margin-bottom: 16px;
 }
-.route-svg {
+.map-container.visible { display: block; }
+#routeMap {
   width: 100%;
-  height: 100%;
+  height: 250px;
 }
-.route-info {
+.map-route-info {
   display: flex;
   justify-content: space-between;
   align-items: center;
-  gap: 12px;
+  padding: 10px 14px;
+  background: rgba(17,17,32,0.95);
+  border-top: 1px solid var(--card-border);
 }
-.route-endpoint {
+.map-endpoint {
   flex: 1;
   min-width: 0;
 }
-.route-endpoint-label {
-  font-size: 10px;
+.map-endpoint-label {
+  font-size: 9px;
   font-weight: 700;
   text-transform: uppercase;
-  letter-spacing: 1px;
-  margin-bottom: 4px;
+  letter-spacing: 0.8px;
 }
-.route-endpoint-label.from { color: var(--cyan); }
-.route-endpoint-label.to { color: var(--violet); }
-.route-endpoint-addr {
-  font-size: 13px;
+.map-endpoint-label.from { color: var(--cyan); }
+.map-endpoint-label.to { color: var(--violet); }
+.map-endpoint-addr {
+  font-size: 12px;
   color: var(--subtle);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
 }
-.route-middle {
+.map-middle {
   text-align: center;
   flex-shrink: 0;
+  padding: 0 10px;
 }
-.route-distance {
-  font-size: 18px;
+.map-distance {
+  font-size: 16px;
   font-weight: 800;
   background: linear-gradient(135deg, var(--cyan), var(--violet));
   -webkit-background-clip: text;
   -webkit-text-fill-color: transparent;
   background-clip: text;
 }
-.route-duration {
-  font-size: 11px;
+.map-duration {
+  font-size: 10px;
   color: var(--muted);
-}
-.route-price-summary {
-  text-align: center;
-  margin-top: 16px;
-  padding-top: 16px;
-  border-top: 1px solid rgba(255,255,255,0.06);
-}
-.route-price-value {
-  font-size: 32px;
-  font-weight: 900;
-  background: linear-gradient(135deg, var(--cyan), var(--violet));
-  -webkit-background-clip: text;
-  -webkit-text-fill-color: transparent;
-  background-clip: text;
-}
-.route-price-label {
-  font-size: 12px;
-  color: var(--muted);
-  margin-top: 2px;
 }
 
-/* Stripe Elements container */
+/* Stripe Elements */
 .stripe-element {
   background: rgba(255,255,255,0.04);
   border: 1.5px solid rgba(255,255,255,0.1);
-  border-radius: 14px;
-  padding: 16px;
-  min-height: 52px;
+  border-radius: 12px;
+  padding: 14px;
+  min-height: 48px;
   transition: border-color 0.25s, box-shadow 0.25s;
 }
 .stripe-element.StripeElement--focus {
   border-color: var(--cyan);
-  box-shadow: 0 0 0 3px rgba(0,201,255,0.12);
+  box-shadow: 0 0 0 3px rgba(0,201,255,0.1);
 }
 .stripe-element.StripeElement--invalid {
   border-color: var(--danger);
 }
-.stripe-secure-badge {
+.secure-badge {
   display: flex;
   align-items: center;
   justify-content: center;
-  gap: 6px;
-  font-size: 12px;
-  color: #555;
-  margin-top: 10px;
+  gap: 5px;
+  font-size: 11px;
+  color: #444;
+  margin-top: 8px;
 }
+.secure-badge svg { width: 12px; height: 12px; }
 
 /* ── CONFIRMATION ── */
 .booking-confirm {
   display: none;
   text-align: center;
-  padding: 30px 16px;
-  animation: scaleIn 0.5s cubic-bezier(0.34, 1.56, 0.64, 1) both;
+  padding: 24px 14px;
+  animation: scaleIn 0.4s cubic-bezier(0.34, 1.56, 0.64, 1) both;
 }
-.confirm-icon {
-  font-size: 64px;
-  margin-bottom: 16px;
-  animation: pulse 1.5s ease infinite;
+.confirm-check {
+  width: 56px; height: 56px;
+  margin: 0 auto 14px;
+  border-radius: 50%;
+  background: linear-gradient(135deg, var(--success), #16a34a);
+  display: flex;
+  align-items: center;
+  justify-content: center;
 }
+.confirm-check svg { width: 28px; height: 28px; color: #fff; }
 .confirm-title {
-  font-size: 22px;
+  font-size: 20px;
   font-weight: 800;
-  margin-bottom: 8px;
+  margin-bottom: 6px;
   background: linear-gradient(135deg, var(--cyan), var(--violet));
   -webkit-background-clip: text;
   -webkit-text-fill-color: transparent;
@@ -805,201 +743,13 @@ select.b-input option { background: #1a1a2e; color: #fff; }
 }
 .confirm-text {
   color: var(--muted);
-  font-size: 14px;
-  line-height: 1.6;
+  font-size: 13px;
+  line-height: 1.5;
 }
-
-/* ── CARDS ── */
-.card {
-  background: var(--card);
-  border: 1px solid var(--card-border);
-  border-radius: var(--radius);
-  margin: 16px;
-  padding: 22px;
-}
-.bio { color: var(--subtle); font-size: 15px; line-height: 1.8; }
-.section-title {
-  font-size: 12px;
-  font-weight: 700;
-  color: var(--cyan);
-  text-transform: uppercase;
-  letter-spacing: 1.2px;
-  margin-bottom: 14px;
-}
-
-/* ── PRICING GRID ── */
-.pricing-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
-.pricing-item {
-  background: rgba(255,255,255,0.03);
-  border: 1px solid var(--card-border);
-  border-radius: 14px;
-  padding: 16px;
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 6px;
-}
-.pricing-label { font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.5px; }
-.pricing-price { font-size: 22px; font-weight: 800; color: var(--cyan); }
-
-/* ── PROMO CODE ── */
-.promo-card {
-  background: linear-gradient(135deg, rgba(245,158,11,0.06), rgba(245,158,11,0.02));
-  border: 1px solid rgba(245,158,11,0.2);
-  border-radius: var(--radius);
-  margin: 16px;
-  padding: 24px;
-  text-align: center;
-}
-.promo-badge {
-  font-size: 11px;
-  font-weight: 700;
-  color: var(--amber);
-  text-transform: uppercase;
-  letter-spacing: 1.5px;
-  margin-bottom: 12px;
-}
-.promo-value {
-  font-size: 40px;
-  font-weight: 900;
-  color: var(--amber);
-  margin-bottom: 8px;
-}
-.promo-code-box {
-  display: inline-block;
-  background: rgba(0,0,0,0.3);
-  border: 2px dashed rgba(245,158,11,0.4);
-  border-radius: 12px;
-  padding: 12px 28px;
-  margin: 4px 0;
-}
-.promo-code {
-  font-size: 22px;
-  font-weight: 900;
-  color: #fff;
-  letter-spacing: 4px;
-  font-family: 'SF Mono', 'Fira Code', monospace;
-}
-.promo-hint {
-  font-size: 12px;
-  color: var(--muted);
-  margin-top: 10px;
-}
-
-/* ── SECONDARY CTA ── */
-.cta-secondary {
-  display: block;
-  width: calc(100% - 32px);
-  margin: 8px auto 16px;
-  background: transparent;
-  border: 2px solid var(--cyan);
-  border-radius: 16px;
-  padding: 16px;
-  font-size: 16px;
-  font-weight: 700;
-  color: var(--cyan);
-  cursor: pointer;
-  transition: all 0.25s;
-  text-align: center;
-  text-decoration: none;
-  font-family: var(--font);
-  min-height: 54px;
-}
-.cta-secondary:hover { background: var(--cyan); color: #fff; }
-.cta-sub { display: block; text-align: center; font-size: 12px; color: var(--muted); margin-bottom: 16px; }
-
-/* ── TIP ── */
-.tip-amounts { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; margin-bottom: 14px; }
-.tip-btn {
-  background: rgba(255,255,255,0.04);
-  border: 2px solid rgba(255,255,255,0.08);
-  border-radius: 14px;
-  padding: 14px 0;
-  text-align: center;
-  font-size: 16px;
-  font-weight: 700;
-  color: #fff;
-  cursor: pointer;
-  transition: all 0.2s;
-  min-height: 50px;
-}
-.tip-btn.selected, .tip-btn:hover { border-color: var(--cyan); background: rgba(0,201,255,0.08); color: var(--cyan); }
-.pay-btn {
-  width: 100%;
-  background: linear-gradient(135deg, var(--cyan), var(--violet));
-  border: none;
-  border-radius: 16px;
-  padding: 18px;
-  font-size: 17px;
-  font-weight: 700;
-  color: #fff;
-  cursor: pointer;
-  font-family: var(--font);
-  min-height: 56px;
-  transition: all 0.2s;
-}
-.pay-btn:hover { opacity: 0.9; }
-.pay-btn:disabled { opacity: 0.4; cursor: not-allowed; }
-
-/* ── REVIEW ── */
-.review-stars { display: flex; gap: 10px; justify-content: center; margin-bottom: 16px; }
-.review-star { font-size: 36px; cursor: pointer; color: #222; transition: color 0.15s, transform 0.15s; }
-.review-star.lit { color: #FFD700; }
-.review-star:hover { transform: scale(1.15); }
-textarea {
-  width: 100%;
-  background: rgba(255,255,255,0.04);
-  border: 1.5px solid rgba(255,255,255,0.1);
-  border-radius: 14px;
-  padding: 14px 16px;
-  font-size: 15px;
-  color: #fff;
-  resize: none;
-  min-height: 100px;
-  margin-bottom: 12px;
-  font-family: var(--font);
-  transition: border-color 0.2s;
-}
-textarea:focus { outline: none; border-color: var(--cyan); }
-input[type=text], input[type=email], input[type=tel], input[type=date], input[type=time] {
-  width: 100%;
-  background: rgba(255,255,255,0.04);
-  border: 1.5px solid rgba(255,255,255,0.1);
-  border-radius: 14px;
-  padding: 15px 16px;
-  font-size: 16px;
-  color: #fff;
-  margin-bottom: 10px;
-  font-family: var(--font);
-  min-height: 52px;
-  transition: border-color 0.2s;
-  -webkit-appearance: none;
-}
-input:focus { outline: none; border-color: var(--cyan); }
-.submit-btn {
-  width: 100%;
-  background: rgba(255,255,255,0.04);
-  border: 2px solid var(--cyan);
-  border-radius: 16px;
-  padding: 16px;
-  font-size: 16px;
-  font-weight: 700;
-  color: var(--cyan);
-  cursor: pointer;
-  transition: all 0.2s;
-  font-family: var(--font);
-  min-height: 54px;
-}
-.submit-btn:hover { background: var(--cyan); color: #fff; }
-
-/* ── FOOTER ── */
-.foreas-badge { text-align: center; padding: 32px 16px 48px; color: #333; font-size: 12px; }
-.foreas-badge a { color: var(--cyan); text-decoration: none; font-weight: 600; }
-.foreas-badge .legal { margin-top: 8px; font-size: 10px; color: #222; }
 
 /* ── MESSAGES ── */
-.success-msg { background: rgba(34,197,94,0.08); border: 1px solid rgba(34,197,94,0.3); border-radius: 14px; padding: 16px; color: var(--success); text-align: center; margin-top: 12px; display: none; font-size: 14px; }
-.error-msg { background: rgba(239,68,68,0.08); border: 1px solid rgba(239,68,68,0.3); border-radius: 14px; padding: 16px; color: var(--danger); text-align: center; margin-top: 12px; display: none; font-size: 14px; }
+.success-msg { background: rgba(34,197,94,0.08); border: 1px solid rgba(34,197,94,0.3); border-radius: 12px; padding: 12px; color: var(--success); text-align: center; margin-top: 10px; display: none; font-size: 13px; }
+.error-msg { background: rgba(239,68,68,0.08); border: 1px solid rgba(239,68,68,0.3); border-radius: 12px; padding: 12px; color: var(--danger); text-align: center; margin-top: 10px; display: none; font-size: 13px; }
 
 /* ── STICKY BAR ── */
 .sticky-bar {
@@ -1007,22 +757,24 @@ input:focus { outline: none; border-color: var(--cyan); }
   bottom: 0; left: 0; right: 0;
   z-index: 999;
   transform: translateY(100%);
-  transition: transform 0.35s cubic-bezier(0.4, 0, 0.2, 1);
-  background: linear-gradient(0deg, var(--bg) 0%, rgba(6,6,16,0.97) 100%);
-  border-top: 1px solid var(--card-border);
-  padding: 12px 16px calc(12px + env(safe-area-inset-bottom, 0px));
+  transition: transform 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+  background: rgba(6,6,16,0.95);
+  backdrop-filter: blur(20px);
+  -webkit-backdrop-filter: blur(20px);
+  border-top: 1px solid rgba(255,255,255,0.06);
+  padding: 10px 16px calc(10px + env(safe-area-inset-bottom, 0px));
 }
 .sticky-bar.visible { transform: translateY(0); }
 .sticky-bar-inner { max-width: 480px; margin: 0 auto; display: flex; align-items: center; gap: 12px; }
 .sticky-bar-info { flex: 1; }
-.sticky-bar-name { font-size: 14px; font-weight: 700; }
-.sticky-bar-price { font-size: 12px; color: var(--cyan); font-weight: 600; }
+.sticky-bar-name { font-size: 13px; font-weight: 700; }
+.sticky-bar-price { font-size: 11px; color: var(--cyan); font-weight: 600; }
 .sticky-bar-btn {
   background: linear-gradient(135deg, var(--cyan), var(--violet));
   border: none;
-  border-radius: 14px;
-  padding: 14px 28px;
-  font-size: 15px;
+  border-radius: 12px;
+  padding: 12px 24px;
+  font-size: 14px;
   font-weight: 700;
   color: #fff;
   cursor: pointer;
@@ -1040,100 +792,143 @@ input:focus { outline: none; border-color: var(--cyan); }
   top: 100%;
   left: 0; right: 0;
   background: #15152a;
-  border: 1px solid rgba(0,201,255,0.15);
+  border: 1px solid rgba(0,201,255,0.12);
   border-top: none;
-  border-radius: 0 0 14px 14px;
-  max-height: 240px;
+  border-radius: 0 0 12px 12px;
+  max-height: 200px;
   overflow-y: auto;
   z-index: 100;
   display: none;
-  box-shadow: 0 12px 40px rgba(0,0,0,0.5);
+  box-shadow: 0 8px 30px rgba(0,0,0,0.5);
 }
 .addr-suggestions.open { display: block; }
 .addr-item {
-  padding: 14px 16px;
-  font-size: 14px;
+  padding: 12px 14px;
+  font-size: 13px;
   color: #ccc;
   cursor: pointer;
   border-bottom: 1px solid rgba(255,255,255,0.04);
   font-family: var(--font);
   transition: background 0.15s;
 }
-.addr-item:hover, .addr-item:focus { background: rgba(0,201,255,0.08); color: #fff; }
-.addr-item:last-child { border-bottom: none; border-radius: 0 0 14px 14px; }
-.addr-item .addr-city { color: var(--muted); font-size: 12px; margin-top: 3px; }
+.addr-item:hover, .addr-item:focus { background: rgba(0,201,255,0.06); color: #fff; }
+.addr-item:last-child { border-bottom: none; border-radius: 0 0 12px 12px; }
+.addr-item .addr-city { color: var(--muted); font-size: 11px; margin-top: 2px; }
+
+/* ── FOOTER ── */
+.foreas-footer {
+  text-align: center;
+  padding: 20px 16px 32px;
+  color: #333;
+  font-size: 11px;
+}
+.foreas-footer a { color: rgba(0,201,255,0.5); text-decoration: none; font-weight: 600; }
+.foreas-footer .legal { margin-top: 6px; font-size: 9px; color: #222; }
+
+/* Form inputs general */
+input[type=text], input[type=email], input[type=tel], input[type=date], input[type=time] {
+  width: 100%;
+  background: rgba(255,255,255,0.04);
+  border: 1.5px solid rgba(255,255,255,0.1);
+  border-radius: 12px;
+  padding: 13px 14px;
+  font-size: 15px;
+  color: #fff;
+  margin-bottom: 8px;
+  font-family: var(--font);
+  min-height: 48px;
+  transition: border-color 0.2s;
+  -webkit-appearance: none;
+}
+input:focus { outline: none; border-color: var(--cyan); }
 
 /* ── RESPONSIVE ── */
 @media(max-width: 400px) {
-  .tip-amounts { grid-template-columns: repeat(2, 1fr); }
-  .pricing-grid { grid-template-columns: 1fr; }
   .field-row { flex-direction: column; gap: 0; }
-  .route-info { flex-direction: column; text-align: center; }
-  .route-endpoint { text-align: center; }
-  h1 { font-size: 24px; }
-  .price-value { font-size: 36px; }
+  .map-route-info { flex-direction: column; text-align: center; gap: 6px; }
+  .map-endpoint { text-align: center; }
+  h1 { font-size: 20px; }
+  .price-value { font-size: 32px; }
 }
 </style>
 </head>
 <body>
 <div class="wrap">
 
-<!-- ═══ 1. HERO ═══ -->
+<!-- ═══ 1. COMPACT HERO ═══ -->
 <header class="hero">
   ${
     site.photo_url
-      ? `<img class="avatar" src="${site.photo_url}" alt="Photo de ${displayName}, ${vehicleType} ${city}" width="110" height="110" loading="eager">`
+      ? `<img class="avatar" src="${site.photo_url}" alt="Photo de ${displayName}, ${vehicleType} ${city}" width="72" height="72" loading="eager">`
       : `<div class="avatar-placeholder">${displayName[0].toUpperCase()}</div>`
   }
-  <h1>${displayName}</h1>
-  <div class="vehicle">${vehicleType} · ${city}</div>
-  <div class="stars" aria-label="Note ${rating.toFixed(1)} sur 5">${stars}</div>
-  <div class="rating-text">${rating.toFixed(1)}/5 · ${totalTipCount > 0 ? totalTipCount + ' avis' : 'Nouveau sur FOREAS'}</div>
+  <div class="hero-info">
+    <h1>${displayName}</h1>
+    <div class="hero-sub">${vehicleType} · ${city}</div>
+    <div class="hero-rating">
+      <span class="hero-stars" aria-label="Note ${rating.toFixed(1)} sur 5">${stars}</span>
+      <span class="hero-rating-text">${rating.toFixed(1)} · ${totalTipCount > 0 ? totalTipCount + ' avis' : 'Nouveau'}</span>
+    </div>
+    <div class="hero-bio-line">${bio.substring(0, 80)}...</div>
+  </div>
 </header>
 
-<!-- ═══ 2. TRUST BAR (enrichie) ═══ -->
+<!-- ═══ 2. TRUST BAR ═══ -->
 <div class="trust-row">
   <div class="trust-badge" style="--i:0">
-    <div class="trust-icon">🛡️</div>
-    <div class="trust-val">Vérifié</div>
-    <div class="trust-label">Carte VTC</div>
+    <div class="trust-icon"><svg viewBox="0 0 24 24" fill="none" stroke="var(--cyan)" stroke-width="2"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg></div>
+    <div class="trust-text">
+      <div class="trust-val">Verifie</div>
+      <div class="trust-label">Carte VTC</div>
+    </div>
   </div>
   <div class="trust-badge" style="--i:1">
-    <div class="trust-icon">🚗</div>
-    <div class="trust-val">${tripsLabel}</div>
-    <div class="trust-label">Courses</div>
+    <div class="trust-icon"><svg viewBox="0 0 24 24" fill="none" stroke="var(--cyan)" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M12 6v6l4 2"/></svg></div>
+    <div class="trust-text">
+      <div class="trust-val">${tripsLabel}</div>
+      <div class="trust-label">Courses</div>
+    </div>
   </div>
   <div class="trust-badge" style="--i:2">
-    <div class="trust-icon">⭐</div>
-    <div class="trust-val">${rating.toFixed(1)}</div>
-    <div class="trust-label">Note</div>
+    <div class="trust-icon"><svg viewBox="0 0 24 24" fill="none" stroke="#FFD700" stroke-width="2"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/></svg></div>
+    <div class="trust-text">
+      <div class="trust-val">${rating.toFixed(1)}</div>
+      <div class="trust-label">Note</div>
+    </div>
   </div>
   <div class="trust-badge" style="--i:3">
-    <div class="trust-icon">📋</div>
-    <div class="trust-val">RC Pro</div>
-    <div class="trust-label">Assuré</div>
+    <div class="trust-icon"><svg viewBox="0 0 24 24" fill="none" stroke="var(--cyan)" stroke-width="2"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M7 8h10M7 12h6"/></svg></div>
+    <div class="trust-text">
+      <div class="trust-val">RC Pro</div>
+      <div class="trust-label">Assure</div>
+    </div>
   </div>
   <div class="trust-badge" style="--i:4">
-    <div class="trust-icon">🗣️</div>
-    <div class="trust-val">${languages[0]}</div>
-    <div class="trust-label">Langue</div>
+    <div class="trust-icon"><svg viewBox="0 0 24 24" fill="none" stroke="var(--cyan)" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M2 12h20M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/></svg></div>
+    <div class="trust-text">
+      <div class="trust-val">${languages[0]}</div>
+      <div class="trust-label">Langue</div>
+    </div>
   </div>
 </div>
 
-<!-- ═══ 3. BOOKING MODULE — 2 ÉTAPES ═══ -->
+<!-- ═══ 3. BOOKING MODULE — 2 STEPS ═══ -->
 <div class="booking" id="bookingSection">
-  <div class="booking-title">Réservez votre trajet</div>
-  <div class="booking-sub" id="bookingSub">Prix instantané · Paiement sécurisé</div>
+  <div class="booking-title">Reservez votre trajet</div>
+  <div class="booking-sub" id="bookingSub">Prix instantane · Paiement securise</div>
 
   <div class="booking-progress">
     <div class="booking-step-dot active" id="dot1"></div>
     <div class="booking-step-dot" id="dot2"></div>
   </div>
 
-  <!-- ── STEP 1: Départ / Arrivée / Prix ── -->
+  <!-- ── STEP 1: Depart / Arrivee / Date / Heure / Prix ── -->
   <div class="booking-step visible" id="step1">
     <div class="field-group">
-      <div class="field-label"><span class="icon">📍</span> Départ</div>
+      <div class="field-label">
+        <svg viewBox="0 0 24 24" fill="none" stroke="var(--cyan)" stroke-width="2"><circle cx="12" cy="10" r="3"/><path d="M12 21.7C17.3 17 20 13 20 10a8 8 0 1 0-16 0c0 3 2.7 7 8 11.7z"/></svg>
+        Depart
+      </div>
       <div class="addr-wrap">
         <input type="text" class="b-input" id="bFrom" placeholder="Ex: 10 rue de Rivoli, Paris" autocomplete="off">
         <div class="addr-suggestions" id="addrSuggest1"></div>
@@ -1141,219 +936,133 @@ input:focus { outline: none; border-color: var(--cyan); }
     </div>
 
     <div class="field-group">
-      <div class="field-label"><span class="icon">🏁</span> Arrivée</div>
+      <div class="field-label">
+        <svg viewBox="0 0 24 24" fill="none" stroke="var(--violet)" stroke-width="2"><path d="M21 10c0 7-9 13-9 13s-9-6-9-13a9 9 0 0 1 18 0z"/><circle cx="12" cy="10" r="3"/></svg>
+        Arrivee
+      </div>
       <div class="addr-wrap">
-        <input type="text" class="b-input" id="bTo" placeholder="Ex: Aéroport CDG, Terminal 2" autocomplete="off">
+        <input type="text" class="b-input" id="bTo" placeholder="Ex: Aeroport CDG, Terminal 2" autocomplete="off">
         <div class="addr-suggestions" id="addrSuggest2"></div>
       </div>
     </div>
 
     <div class="field-row">
       <div class="field-group">
-        <div class="field-label"><span class="icon">📅</span> Date</div>
+        <div class="field-label">
+          <svg viewBox="0 0 24 24" fill="none" stroke="var(--muted)" stroke-width="2"><rect x="3" y="4" width="18" height="18" rx="2"/><path d="M16 2v4M8 2v4M3 10h18"/></svg>
+          Date
+        </div>
         <input type="date" class="b-input" id="bDate">
       </div>
       <div class="field-group">
-        <div class="field-label"><span class="icon">⏰</span> Heure</div>
+        <div class="field-label">
+          <svg viewBox="0 0 24 24" fill="none" stroke="var(--muted)" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M12 6v6l4 2"/></svg>
+          Heure
+        </div>
         <input type="time" class="b-input" id="bTime">
       </div>
     </div>
 
-    <!-- Prix estimé (apparaît dynamiquement) -->
+    <!-- Prix estime (apparait dynamiquement) -->
     <div class="price-estimate" id="priceEstimate">
       <div class="price-estimate-bg"></div>
-      <div class="price-label" id="priceLabel">Tarif estimé · Prix fixe garanti</div>
+      <div class="price-label" id="priceLabel">Tarif estime · Prix fixe garanti</div>
       <div class="price-value" id="priceValue"></div>
       <div class="price-detail" id="priceDetail"></div>
       <div class="price-promo-badge" id="promoBadge" style="display:none"></div>
     </div>
 
     <button class="cta-accept" id="acceptBtn" onclick="acceptBooking()" disabled>
-      ✓ J'accepte — Réserver
+      J'accepte -- Reserver
     </button>
   </div>
 
-  <!-- ── STEP 2: Animation Tracé + Paiement ── -->
+  <!-- ── STEP 2: Map + Contact + Confirm ── -->
   <div class="booking-step" id="step2">
 
-    <!-- Carte du tracé (SVG animé) -->
-    <div class="route-card" id="routeCard">
-      <div class="route-svg-container">
-        <svg class="route-svg" id="routeSvg" viewBox="0 0 400 120" preserveAspectRatio="xMidYMid meet">
-          <defs>
-            <linearGradient id="routeGradient" x1="0%" y1="0%" x2="100%" y2="0%">
-              <stop offset="0%" style="stop-color:#00C9FF;stop-opacity:1" />
-              <stop offset="50%" style="stop-color:#8C52FF;stop-opacity:1" />
-              <stop offset="100%" style="stop-color:#00C9FF;stop-opacity:1" />
-            </linearGradient>
-            <filter id="glow">
-              <feGaussianBlur stdDeviation="3" result="coloredBlur"/>
-              <feMerge>
-                <feMergeNode in="coloredBlur"/>
-                <feMergeNode in="SourceGraphic"/>
-              </feMerge>
-            </filter>
-          </defs>
-          <!-- Route path (drawn with animation) -->
-          <path id="routePath" d="M 40 80 C 120 20, 200 100, 280 40 S 360 60, 360 50"
-                fill="none" stroke="url(#routeGradient)" stroke-width="3" stroke-linecap="round"
-                stroke-dasharray="1000" stroke-dashoffset="1000" filter="url(#glow)"
-                style="animation: drawRoute 2s ease forwards 0.3s" />
-          <!-- Departure dot -->
-          <circle cx="40" cy="80" r="6" fill="#00C9FF" filter="url(#glow)">
-            <animate attributeName="r" values="6;9;6" dur="2s" repeatCount="indefinite" />
-          </circle>
-          <circle cx="40" cy="80" r="3" fill="#fff" />
-          <!-- Arrival dot -->
-          <circle cx="360" cy="50" r="6" fill="#8C52FF" filter="url(#glow)" opacity="0"
-                  style="animation: fadeIn 0.3s ease 2s forwards">
-            <animate attributeName="r" values="6;9;6" dur="2s" repeatCount="indefinite" begin="2s" />
-          </circle>
-          <circle cx="360" cy="50" r="3" fill="#fff" opacity="0" style="animation: fadeIn 0.3s ease 2s forwards" />
-        </svg>
-      </div>
-
-      <!-- Route info -->
-      <div class="route-info">
-        <div class="route-endpoint">
-          <div class="route-endpoint-label from">Départ</div>
-          <div class="route-endpoint-addr" id="routeFrom">—</div>
+    <!-- Mapbox GL Map -->
+    <div class="map-container" id="mapContainer">
+      <div id="routeMap"></div>
+      <div class="map-route-info">
+        <div class="map-endpoint">
+          <div class="map-endpoint-label from">Depart</div>
+          <div class="map-endpoint-addr" id="routeFrom">--</div>
         </div>
-        <div class="route-middle">
-          <div class="route-distance" id="routeDist">—</div>
-          <div class="route-duration" id="routeDur">~35 min</div>
+        <div class="map-middle">
+          <div class="map-distance" id="routeDist">--</div>
+          <div class="map-duration" id="routeDur"></div>
         </div>
-        <div class="route-endpoint" style="text-align:right">
-          <div class="route-endpoint-label to">Arrivée</div>
-          <div class="route-endpoint-addr" id="routeTo">—</div>
+        <div class="map-endpoint" style="text-align:right">
+          <div class="map-endpoint-label to">Arrivee</div>
+          <div class="map-endpoint-addr" id="routeTo">--</div>
         </div>
-      </div>
-
-      <!-- Récap prix -->
-      <div class="route-price-summary">
-        <div class="route-price-value" id="routePrice">—</div>
-        <div class="route-price-label">Prix fixe garanti</div>
       </div>
     </div>
 
-    <!-- Formulaire passager -->
+    <!-- Contact fields -->
     <div class="field-group">
-      <div class="field-label"><span class="icon">👤</span> Prénom</div>
-      <input type="text" class="b-input" id="bFirstName" placeholder="Votre prénom">
+      <div class="field-label">
+        <svg viewBox="0 0 24 24" fill="none" stroke="var(--muted)" stroke-width="2"><rect x="2" y="4" width="20" height="16" rx="2"/><path d="m22 7-8.97 5.7a1.94 1.94 0 0 1-2.06 0L2 7"/></svg>
+        Email
+      </div>
+      <input type="email" class="b-input" id="bEmail" placeholder="votre@email.com" autocomplete="email">
     </div>
     <div class="field-group">
-      <div class="field-label"><span class="icon">👤</span> Nom</div>
-      <input type="text" class="b-input" id="bLastName" placeholder="Votre nom">
-    </div>
-    <div class="field-group">
-      <div class="field-label"><span class="icon">📱</span> Téléphone</div>
+      <div class="field-label">
+        <svg viewBox="0 0 24 24" fill="none" stroke="var(--muted)" stroke-width="2"><path d="M22 16.92v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07 19.5 19.5 0 0 1-6-6 19.79 19.79 0 0 1-3.07-8.67A2 2 0 0 1 4.11 2h3a2 2 0 0 1 2 1.72c.127.96.361 1.903.7 2.81a2 2 0 0 1-.45 2.11L8.09 9.91a16 16 0 0 0 6 6l1.27-1.27a2 2 0 0 1 2.11-.45c.907.339 1.85.573 2.81.7A2 2 0 0 1 22 16.92z"/></svg>
+        Telephone
+      </div>
       <input type="tel" class="b-input" id="bPhone" placeholder="+33 6 12 34 56 78">
     </div>
 
-    <!-- Stripe Elements (si chauffeur connecté Stripe) -->
+    <!-- Stripe Elements (si chauffeur connecte Stripe) -->
     ${
       canAcceptPayment
         ? `
     <div class="field-group">
-      <div class="field-label"><span class="icon">💳</span> Carte bancaire</div>
+      <div class="field-label">
+        <svg viewBox="0 0 24 24" fill="none" stroke="var(--muted)" stroke-width="2"><rect x="1" y="4" width="22" height="16" rx="2"/><path d="M1 10h22"/></svg>
+        Carte bancaire
+      </div>
       <div class="stripe-element" id="cardElement"></div>
-      <div id="cardErrors" style="color:var(--danger);font-size:12px;margin-top:6px;display:none"></div>
+      <div id="cardErrors" style="color:var(--danger);font-size:11px;margin-top:4px;display:none"></div>
     </div>
     `
         : ''
     }
 
     <button class="cta-pay" id="payBtn" onclick="submitPayment()" disabled>
-      ${canAcceptPayment ? '🔒 Payer — €' : 'Confirmer la réservation'}
+      ${canAcceptPayment ? 'Payer' : 'Confirmer la reservation'}
     </button>
-    <div class="stripe-secure-badge">
-      ${canAcceptPayment ? '🔒 Paiement sécurisé par Stripe' : '✓ Réservation gratuite · Sans engagement'}
+    <div class="secure-badge">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>
+      ${canAcceptPayment ? 'Paiement securise' : 'Reservation gratuite · Sans engagement'}
     </div>
 
-    <button class="booking-back" onclick="goStep1()">← Modifier le trajet</button>
+    <button class="booking-back" onclick="goStep1()">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14"><path d="M19 12H5M12 19l-7-7 7-7"/></svg>
+      Modifier le trajet
+    </button>
   </div>
 
   <!-- Confirmation -->
   <div class="booking-confirm" id="bookingConfirm">
-    <div class="confirm-icon">✅</div>
-    <div class="confirm-title">Réservation confirmée !</div>
+    <div class="confirm-check">
+      <svg viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="3"><polyline points="20 6 9 17 4 12"/></svg>
+    </div>
+    <div class="confirm-title">Reservation confirmee</div>
     <div class="confirm-text">
-      ${firstName} a bien reçu votre demande et vous recontactera très rapidement.<br>
-      Un SMS de confirmation vous a été envoyé.
+      ${firstName} a bien recu votre demande et vous recontactera rapidement.<br>
+      Un SMS de confirmation vous a ete envoye.
     </div>
   </div>
   <div class="error-msg" id="bookingError"></div>
 </div>
 
-<!-- ═══ 4. BIO ═══ -->
-<div class="card">
-  <div class="section-title">À propos</div>
-  <div class="bio">${bio}</div>
-</div>
-
-<!-- ═══ 5. TARIFS ═══ -->
-${pricingHtml}
-
-<!-- ═══ 6. CODE PROMO ═══ -->
-${
-  promoCode && promoPercent > 0
-    ? `
-<div class="promo-card">
-  <div class="promo-badge">🎁 Offre 1ère réservation</div>
-  <div class="promo-value">-${promoPercent}%</div>
-  <div class="promo-code-box">
-    <span class="promo-code">${promoCode}</span>
-  </div>
-  <div class="promo-hint">Appliqué automatiquement · Valable 1 fois</div>
-</div>
-`
-    : ''
-}
-
-<!-- ═══ 7. CTA SECONDAIRE ═══ -->
-<button class="cta-secondary" onclick="document.getElementById('bookingSection').scrollIntoView({behavior:'smooth'})">
-  Réserver ${firstName} maintenant
-</button>
-<span class="cta-sub">Sans application · Réponse immédiate</span>
-
-<!-- ═══ 8. POURBOIRE ═══ -->
-<div class="card">
-  <div class="section-title">💳 Laisser un pourboire</div>
-  <div class="tip-amounts">
-    <div class="tip-btn" onclick="selectTip(2)" data-amount="2">2€</div>
-    <div class="tip-btn" onclick="selectTip(5)" data-amount="5">5€</div>
-    <div class="tip-btn" onclick="selectTip(10)" data-amount="10">10€</div>
-    <div class="tip-btn" onclick="selectTip(0)" data-amount="0">Autre</div>
-  </div>
-  <input type="text" id="customTip" placeholder="Montant personnalisé (€)" style="display:none" oninput="updateCustom(this.value)">
-  <input type="email" id="passengerEmail" placeholder="Votre email (pour le reçu)" autocomplete="email">
-  <button class="pay-btn" id="tipPayBtn" onclick="processTip()" disabled>Sélectionnez un montant</button>
-  <div class="stripe-secure-badge">🔒 Paiement sécurisé par Stripe</div>
-  <div class="success-msg" id="tipSuccess">Merci ! Votre pourboire a été envoyé à ${firstName}.</div>
-  <div class="error-msg" id="tipError"></div>
-</div>
-
-<!-- ═══ 9. AVIS ═══ -->
-<div class="card">
-  <div class="section-title">⭐ Laisser un avis</div>
-  <div class="review-stars">
-    <span class="review-star" onclick="setRating(1)" aria-label="1 étoile">★</span>
-    <span class="review-star" onclick="setRating(2)" aria-label="2 étoiles">★</span>
-    <span class="review-star" onclick="setRating(3)" aria-label="3 étoiles">★</span>
-    <span class="review-star" onclick="setRating(4)" aria-label="4 étoiles">★</span>
-    <span class="review-star" onclick="setRating(5)" aria-label="5 étoiles">★</span>
-  </div>
-  <textarea id="reviewText" placeholder="Décrivez votre expérience avec ${firstName}..."></textarea>
-  <input type="text" id="reviewName" placeholder="Votre prénom (optionnel)">
-  <button class="submit-btn" onclick="submitReview()">Publier l'avis</button>
-  <div class="success-msg" id="reviewSuccess">Merci pour votre avis !</div>
-  <div class="error-msg" id="reviewError"></div>
-</div>
-
-<!-- ═══ 10. FOOTER ═══ -->
-<footer class="foreas-badge">
-  Propulsé par <a href="https://foreas.app" target="_blank" rel="noopener">FOREAS</a> · Technologie IA pour chauffeurs VTC<br>
-  <div class="legal">&copy; ${new Date().getFullYear()} FOREAS Labs &middot; <a href="#" style="color:#333">CGU</a> &middot; <a href="#" style="color:#333">Confidentialité</a> &middot; <a href="#" style="color:#333">Mentions légales</a></div>
+<!-- ═══ 4. FOOTER ═══ -->
+<footer class="foreas-footer">
+  Propulse par <a href="https://foreas.xyz" target="_blank" rel="noopener">FOREAS</a><br>
+  <div class="legal">&copy; ${new Date().getFullYear()} FOREAS Labs &middot; <a href="#" style="color:#333">CGU</a> &middot; <a href="#" style="color:#333">Confidentialite</a> &middot; <a href="#" style="color:#333">Mentions legales</a></div>
 </footer>
 
 </div><!-- /wrap -->
@@ -1366,14 +1075,15 @@ ${
       <div class="sticky-bar-price" id="stickyPrice"></div>
     </div>
     <button class="sticky-bar-btn" onclick="document.getElementById('bookingSection').scrollIntoView({behavior:'smooth'})">
-      Réserver →
+      Reserver
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" width="14" height="14" style="vertical-align:middle;margin-left:4px"><path d="M5 12h14M12 5l7 7-7 7"/></svg>
     </button>
   </div>
 </div>
 
 <script>
 /* ═══════════════════════════════════════════════════════════
-   FOREAS CLIENT SITE — JavaScript Engine v3.0
+   FOREAS CLIENT SITE — JavaScript Engine v4.0
    ═══════════════════════════════════════════════════════════ */
 
 var BACKEND = '${backendUrl}';
@@ -1382,6 +1092,7 @@ var PRICING = ${pricing ? JSON.stringify(pricing) : 'null'};
 var PROMO_PERCENT = ${promoPercent};
 var CAN_PAY = ${canAcceptPayment};
 var STRIPE_PK = ${canAcceptPayment ? `'${stripePublishableKey}'` : 'null'};
+var MAPBOX_TOKEN = ${mapboxToken ? `'${mapboxToken}'` : 'null'};
 var selectedAmount = 0;
 var selectedRating = 0;
 
@@ -1396,6 +1107,9 @@ var calculatedDist = 0;
 var stripe = null;
 var cardElement = null;
 var clientSecret = null;
+
+// Mapbox
+var mapInstance = null;
 
 // ── INIT ──
 (function init() {
@@ -1466,7 +1180,7 @@ var clientSecret = null;
   }
 
   // Enable pay button validation on input
-  ['bFirstName', 'bLastName', 'bPhone'].forEach(function(id) {
+  ['bEmail', 'bPhone'].forEach(function(id) {
     var el = document.getElementById(id);
     if (el) el.addEventListener('input', validateStep2);
   });
@@ -1538,7 +1252,7 @@ function calcPrice() {
       calculatedFare = discounted;
       valEl.innerHTML = '<span class="price-original">' + Math.round(fare) + '\\u20AC</span>' + discounted + '\\u20AC';
       detEl.textContent = roadDist.toFixed(1) + ' km · Prix fixe garanti';
-      promoEl.textContent = '\\uD83C\\uDF81 -' + PROMO_PERCENT + '% · 1ère course';
+      promoEl.textContent = '-' + PROMO_PERCENT + '% · 1ere course';
       promoEl.style.display = 'inline-block';
       if (stickyPriceEl) stickyPriceEl.textContent = discounted + '\\u20AC · ' + roadDist.toFixed(1) + ' km';
     } else {
@@ -1636,21 +1350,164 @@ function setupAddrAutocomplete(inputId, suggestId) {
   });
 }
 
+// ── MAPBOX ROUTE MAP ──
+function initRouteMap() {
+  if (!MAPBOX_TOKEN || !fromCoords || !toCoords) return;
+  if (typeof mapboxgl === 'undefined') return;
+
+  var mapContainer = document.getElementById('mapContainer');
+  mapContainer.classList.add('visible');
+
+  // If map already exists, remove it
+  if (mapInstance) {
+    mapInstance.remove();
+    mapInstance = null;
+  }
+
+  mapboxgl.accessToken = MAPBOX_TOKEN;
+  var lng1 = fromCoords[1], lat1 = fromCoords[0];
+  var lng2 = toCoords[1], lat2 = toCoords[0];
+
+  mapInstance = new mapboxgl.Map({
+    container: 'routeMap',
+    style: 'mapbox://styles/mapbox/dark-v11',
+    center: [(lng1 + lng2) / 2, (lat1 + lat2) / 2],
+    zoom: 10,
+    interactive: true,
+    attributionControl: false,
+  });
+
+  mapInstance.addControl(new mapboxgl.NavigationControl({ showCompass: false }), 'top-right');
+
+  // Markers
+  var fromMarker = document.createElement('div');
+  fromMarker.style.cssText = 'width:16px;height:16px;border-radius:50%;background:var(--cyan,#00C9FF);border:3px solid #fff;box-shadow:0 0 12px rgba(0,201,255,0.6);';
+  var toMarker = document.createElement('div');
+  toMarker.style.cssText = 'width:16px;height:16px;border-radius:50%;background:var(--violet,#8C52FF);border:3px solid #fff;box-shadow:0 0 12px rgba(140,82,255,0.6);';
+
+  new mapboxgl.Marker({ element: fromMarker }).setLngLat([lng1, lat1]).addTo(mapInstance);
+  new mapboxgl.Marker({ element: toMarker }).setLngLat([lng2, lat2]).addTo(mapInstance);
+
+  // Fetch route from Directions API
+  var dirUrl = 'https://api.mapbox.com/directions/v5/mapbox/driving/' + lng1 + ',' + lat1 + ';' + lng2 + ',' + lat2 + '?geometries=geojson&access_token=' + MAPBOX_TOKEN;
+
+  fetch(dirUrl)
+    .then(function(r) { return r.json(); })
+    .then(function(data) {
+      if (!data.routes || !data.routes.length) return;
+      var route = data.routes[0];
+      var geojson = route.geometry;
+
+      // Update duration from real data
+      var durMin = Math.round(route.duration / 60);
+      var durEl = document.getElementById('routeDur');
+      if (durEl) durEl.textContent = '~' + durMin + ' min';
+
+      // Update distance from real data
+      var realDist = (route.distance / 1000).toFixed(1);
+      var distEl = document.getElementById('routeDist');
+      if (distEl) distEl.textContent = realDist + ' km';
+
+      mapInstance.on('load', function() {
+        addRouteLayer(geojson);
+      });
+
+      // If map is already loaded
+      if (mapInstance.loaded()) {
+        addRouteLayer(geojson);
+      }
+
+      // Fit bounds
+      var coords = geojson.coordinates;
+      var bounds = coords.reduce(function(b, c) {
+        return b.extend(c);
+      }, new mapboxgl.LngLatBounds(coords[0], coords[0]));
+      mapInstance.fitBounds(bounds, { padding: 40, maxZoom: 14, duration: 1000 });
+    })
+    .catch(function(e) {
+      console.log('Directions API error:', e);
+      // Fallback: fit to markers
+      var bounds = new mapboxgl.LngLatBounds();
+      bounds.extend([lng1, lat1]);
+      bounds.extend([lng2, lat2]);
+      mapInstance.fitBounds(bounds, { padding: 40, maxZoom: 14 });
+    });
+}
+
+function addRouteLayer(geojson) {
+  if (!mapInstance) return;
+  // Avoid duplicate
+  if (mapInstance.getSource('route')) return;
+
+  mapInstance.addSource('route', {
+    type: 'geojson',
+    data: { type: 'Feature', properties: {}, geometry: geojson }
+  });
+
+  // Route glow (background)
+  mapInstance.addLayer({
+    id: 'route-glow',
+    type: 'line',
+    source: 'route',
+    layout: { 'line-join': 'round', 'line-cap': 'round' },
+    paint: {
+      'line-color': '#8C52FF',
+      'line-width': 10,
+      'line-opacity': 0.15,
+      'line-blur': 8,
+    }
+  });
+
+  // Main route line with gradient
+  mapInstance.addLayer({
+    id: 'route-line',
+    type: 'line',
+    source: 'route',
+    layout: { 'line-join': 'round', 'line-cap': 'round' },
+    paint: {
+      'line-color': '#00C9FF',
+      'line-width': 4,
+      'line-opacity': 1,
+      'line-gradient': [
+        'interpolate',
+        ['linear'],
+        ['line-progress'],
+        0, '#00C9FF',
+        0.5, '#8C52FF',
+        1, '#00C9FF'
+      ],
+    }
+  });
+
+  // Animate pulse effect on the route
+  var opacity = 1;
+  var direction = -1;
+  function pulseRoute() {
+    opacity += direction * 0.01;
+    if (opacity <= 0.5) direction = 1;
+    if (opacity >= 1) direction = -1;
+    if (mapInstance && mapInstance.getLayer('route-line')) {
+      mapInstance.setPaintProperty('route-line', 'line-opacity', opacity);
+    }
+    requestAnimationFrame(pulseRoute);
+  }
+  pulseRoute();
+}
+
 // ── STEP NAVIGATION ──
 function acceptBooking() {
-  // Fill route card info
+  // Fill route info
   var fromAddr = document.getElementById('bFrom').value.trim();
   var toAddr = document.getElementById('bTo').value.trim();
   document.getElementById('routeFrom').textContent = fromAddr.split(',')[0] || fromAddr;
   document.getElementById('routeTo').textContent = toAddr.split(',')[0] || toAddr;
-  document.getElementById('routeDist').textContent = calculatedDist > 0 ? calculatedDist.toFixed(1) + ' km' : '—';
+  document.getElementById('routeDist').textContent = calculatedDist > 0 ? calculatedDist.toFixed(1) + ' km' : '--';
   document.getElementById('routeDur').textContent = calculatedDist > 0 ? '~' + Math.round(calculatedDist * 1.8) + ' min' : '';
-  document.getElementById('routePrice').textContent = calculatedFare > 0 ? Math.round(calculatedFare) + '\\u20AC' : '—';
 
   // Update pay button
   var payBtn = document.getElementById('payBtn');
   if (CAN_PAY && calculatedFare > 0) {
-    payBtn.textContent = '\\uD83D\\uDD12 Payer ' + Math.round(calculatedFare) + '\\u20AC';
+    payBtn.textContent = 'Payer ' + Math.round(calculatedFare) + '\\u20AC';
   }
 
   // Animate step transition
@@ -1660,18 +1517,13 @@ function acceptBooking() {
   s2.classList.add('visible');
   document.getElementById('dot1').classList.remove('active');
   document.getElementById('dot2').classList.add('active');
-  document.getElementById('bookingSub').textContent = 'Confirmez vos coordonnées';
-
-  // Reset route animation by cloning SVG path
-  var path = document.getElementById('routePath');
-  if (path) {
-    var clone = path.cloneNode(true);
-    path.parentNode.replaceChild(clone, path);
-    clone.id = 'routePath';
-  }
+  document.getElementById('bookingSub').textContent = 'Confirmez vos coordonnees';
 
   // Scroll to step 2
   document.getElementById('bookingSection').scrollIntoView({ behavior: 'smooth', block: 'start' });
+
+  // Init Mapbox route map
+  setTimeout(function() { initRouteMap(); }, 300);
 
   // Create PaymentIntent if Stripe enabled
   if (CAN_PAY && calculatedFare > 0) {
@@ -1691,19 +1543,16 @@ function goStep1() {
   }, 400);
   document.getElementById('dot2').classList.remove('active');
   document.getElementById('dot1').classList.add('active');
-  document.getElementById('bookingSub').textContent = 'Prix instantané · Paiement sécurisé';
+  document.getElementById('bookingSub').textContent = 'Prix instantane · Paiement securise';
 }
 
 // ── VALIDATION ──
 function validateStep2() {
-  var fn = document.getElementById('bFirstName').value.trim();
-  var ln = document.getElementById('bLastName').value.trim();
+  var email = document.getElementById('bEmail').value.trim();
   var ph = document.getElementById('bPhone').value.trim();
   var payBtn = document.getElementById('payBtn');
 
-  var valid = fn.length >= 2 && ln.length >= 2 && ph.length >= 8;
-  // If Stripe, also check card
-  // (Stripe card validation is handled separately, but we enable button if basic fields are filled)
+  var valid = email.length >= 5 && email.indexOf('@') > 0 && ph.length >= 8;
   payBtn.disabled = !valid;
 }
 
@@ -1735,12 +1584,11 @@ function createPaymentIntent() {
 // ── SUBMIT PAYMENT / BOOKING ──
 function submitPayment() {
   var btn = document.getElementById('payBtn');
-  var fn = document.getElementById('bFirstName').value.trim();
-  var ln = document.getElementById('bLastName').value.trim();
+  var email = document.getElementById('bEmail').value.trim();
   var phone = document.getElementById('bPhone').value.trim();
 
-  if (!fn || !ln || !phone) {
-    alert('Veuillez remplir tous les champs obligatoires');
+  if (!email || !phone) {
+    alert('Veuillez remplir email et telephone');
     return;
   }
 
@@ -1754,7 +1602,7 @@ function submitPayment() {
       payment_method: {
         card: cardElement,
         billing_details: {
-          name: fn + ' ' + ln,
+          email: email,
           phone: phone,
         },
       },
@@ -1763,19 +1611,18 @@ function submitPayment() {
         document.getElementById('bookingError').textContent = result.error.message;
         document.getElementById('bookingError').style.display = 'block';
         btn.disabled = false;
-        btn.textContent = '\\uD83D\\uDD12 Payer ' + Math.round(calculatedFare) + '\\u20AC';
+        btn.textContent = 'Payer ' + Math.round(calculatedFare) + '\\u20AC';
       } else if (result.paymentIntent && result.paymentIntent.status === 'succeeded') {
-        // Also save booking
-        saveBooking(fn, ln, phone, result.paymentIntent.id);
+        saveBooking(email, phone, result.paymentIntent.id);
       }
     });
   } else {
     // No Stripe — free booking request
-    saveBooking(fn, ln, phone, null);
+    saveBooking(email, phone, null);
   }
 }
 
-function saveBooking(firstName, lastName, phone, paymentIntentId) {
+function saveBooking(email, phone, paymentIntentId) {
   fetch(BACKEND + '/api/driver-site/booking', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -1785,7 +1632,7 @@ function saveBooking(firstName, lastName, phone, paymentIntentId) {
       destination: document.getElementById('bTo').value,
       booking_date: document.getElementById('bDate').value,
       booking_time: document.getElementById('bTime').value,
-      passenger_name: firstName + ' ' + lastName,
+      passenger_email: email,
       passenger_phone: phone,
       estimated_fare: calculatedFare,
       payment_intent_id: paymentIntentId,
@@ -1808,77 +1655,7 @@ function saveBooking(firstName, lastName, phone, paymentIntentId) {
     document.getElementById('bookingError').style.display = 'block';
     var btn = document.getElementById('payBtn');
     btn.disabled = false;
-    btn.textContent = CAN_PAY ? '\\uD83D\\uDD12 Payer ' + Math.round(calculatedFare) + '\\u20AC' : 'Confirmer la réservation';
-  });
-}
-
-// ── TIP ──
-function selectTip(amount) {
-  document.querySelectorAll('.tip-btn').forEach(function(b) { b.classList.remove('selected'); });
-  document.getElementById('customTip').style.display = amount === 0 ? 'block' : 'none';
-  if (amount > 0) {
-    document.querySelector('[data-amount="' + amount + '"]').classList.add('selected');
-    selectedAmount = amount;
-  } else { selectedAmount = 0; }
-  updatePayBtn();
-}
-
-function updateCustom(val) { selectedAmount = parseFloat(val) || 0; updatePayBtn(); }
-
-function updatePayBtn() {
-  var btn = document.getElementById('tipPayBtn');
-  btn.disabled = selectedAmount < 1;
-  btn.textContent = selectedAmount >= 1 ? 'Payer ' + selectedAmount + '\\u20AC' : 'Sélectionnez un montant';
-}
-
-function processTip() {
-  var btn = document.getElementById('tipPayBtn');
-  var email = document.getElementById('passengerEmail').value;
-  btn.disabled = true;
-  btn.textContent = 'Traitement...';
-  document.getElementById('tipError').style.display = 'none';
-  fetch(BACKEND + '/api/driver-site/tip', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ slug: SLUG, amount: selectedAmount, email: email, source: '${source}' }),
-  })
-  .then(function(r) { return r.json(); })
-  .then(function(data) {
-    if (data.checkout_url) window.location.href = data.checkout_url;
-    else if (data.error) throw new Error(data.error);
-  })
-  .catch(function(e) {
-    document.getElementById('tipError').textContent = 'Erreur: ' + e.message;
-    document.getElementById('tipError').style.display = 'block';
-    btn.disabled = false;
-    updatePayBtn();
-  });
-}
-
-// ── REVIEW ──
-function setRating(n) {
-  selectedRating = n;
-  document.querySelectorAll('.review-star').forEach(function(s, i) { s.classList.toggle('lit', i < n); });
-}
-
-function submitReview() {
-  if (!selectedRating) { alert('Choisissez une note'); return; }
-  var text = document.getElementById('reviewText').value;
-  var name = document.getElementById('reviewName').value;
-  document.getElementById('reviewError').style.display = 'none';
-  fetch(BACKEND + '/api/driver-site/review', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ slug: SLUG, rating: selectedRating, text: text, name: name }),
-  })
-  .then(function() {
-    document.getElementById('reviewSuccess').style.display = 'block';
-    document.getElementById('reviewText').value = '';
-    setRating(0);
-  })
-  .catch(function() {
-    document.getElementById('reviewError').textContent = 'Erreur, réessayez.';
-    document.getElementById('reviewError').style.display = 'block';
+    btn.textContent = CAN_PAY ? 'Payer ' + Math.round(calculatedFare) + '\\u20AC' : 'Confirmer la reservation';
   });
 }
 </script>

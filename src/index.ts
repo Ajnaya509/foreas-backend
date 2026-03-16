@@ -110,10 +110,16 @@ let stripeClient: import('stripe').default | null = null;
 async function getStripe(): Promise<import('stripe').default> {
   if (!stripeClient) {
     const Stripe = (await import('stripe')).default;
-    stripeClient = new Stripe(process.env.STRIPE_SECRET_KEY as string, {
-      apiVersion: '2024-06-20',
+    const key = process.env.STRIPE_SECRET_KEY as string;
+    console.log(
+      '[Stripe] Initializing with key:',
+      key ? `${key.substring(0, 12)}...${key.substring(key.length - 4)}` : 'MISSING',
+    );
+    stripeClient = new Stripe(key, {
+      maxNetworkRetries: 3,
+      timeout: 30000,
     });
-    console.log('[Stripe] Client initialized');
+    console.log('[Stripe] Client initialized successfully');
   }
   return stripeClient;
 }
@@ -2189,7 +2195,14 @@ app.post('/api/driver-site/connect/onboard', async (req: any, res: any) => {
     });
     return res.json({ onboarding_url: accountLink.url, account_id: accountId });
   } catch (err: any) {
-    console.error('[DriverSite] connect error:', err.message);
+    console.error(
+      '[DriverSite] connect error:',
+      err.message,
+      err.type || '',
+      err.code || '',
+      err.statusCode || '',
+    );
+    console.error('[DriverSite] connect stack:', err.stack?.substring(0, 500));
     return res.status(500).json({ error: err.message });
   }
 });

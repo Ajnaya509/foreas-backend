@@ -15,6 +15,7 @@ import { queryEvents, countEvents } from '../data/eventStore';
 import { queryAuditLogs } from '../data/auditLog';
 import { queryOutcomes } from '../data/outcomes';
 import { listDocuments, indexDocument, deleteDocument } from '../ai/rag/indexer';
+import { ingestKnowledgeBase, reingestKnowledgeBase } from '../ai/rag/ingestKnowledgeBase';
 import { logAuditAsync, AUDIT_ACTIONS } from '../data/auditLog';
 import { getSupabaseAdmin } from '../helpers/supabase';
 
@@ -31,65 +32,49 @@ router.use(authenticateUser);
  * GET /api/admin/events
  * Query analytics events
  */
-router.get(
-  '/events',
-  requireSupport,
-  async (req: AuthenticatedRequest, res: Response) => {
-    try {
-      const {
-        actorId,
-        eventName,
-        eventCategory,
-        startDate,
-        endDate,
-        limit,
-        offset,
-      } = req.query;
+router.get('/events', requireSupport, async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const { actorId, eventName, eventCategory, startDate, endDate, limit, offset } = req.query;
 
-      const events = await queryEvents({
-        actorId: actorId as string,
-        eventName: eventName as string,
-        eventCategory: eventCategory as any,
-        startDate: startDate ? new Date(startDate as string) : undefined,
-        endDate: endDate ? new Date(endDate as string) : undefined,
-        limit: limit ? parseInt(limit as string, 10) : 50,
-        offset: offset ? parseInt(offset as string, 10) : 0,
-      });
+    const events = await queryEvents({
+      actorId: actorId as string,
+      eventName: eventName as string,
+      eventCategory: eventCategory as any,
+      startDate: startDate ? new Date(startDate as string) : undefined,
+      endDate: endDate ? new Date(endDate as string) : undefined,
+      limit: limit ? parseInt(limit as string, 10) : 50,
+      offset: offset ? parseInt(offset as string, 10) : 0,
+    });
 
-      res.json(events);
-    } catch (err: any) {
-      console.error('[Admin Routes] Query events error:', err);
-      res.status(500).json({ error: 'Failed to query events' });
-    }
+    res.json(events);
+  } catch (err: any) {
+    console.error('[Admin Routes] Query events error:', err);
+    res.status(500).json({ error: 'Failed to query events' });
   }
-);
+});
 
 /**
  * GET /api/admin/events/count
  * Count events by criteria
  */
-router.get(
-  '/events/count',
-  requireSupport,
-  async (req: AuthenticatedRequest, res: Response) => {
-    try {
-      const { actorId, eventName, eventCategory, startDate, endDate } = req.query;
+router.get('/events/count', requireSupport, async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const { actorId, eventName, eventCategory, startDate, endDate } = req.query;
 
-      const count = await countEvents({
-        actorId: actorId as string,
-        eventName: eventName as string,
-        eventCategory: eventCategory as any,
-        startDate: startDate ? new Date(startDate as string) : undefined,
-        endDate: endDate ? new Date(endDate as string) : undefined,
-      });
+    const count = await countEvents({
+      actorId: actorId as string,
+      eventName: eventName as string,
+      eventCategory: eventCategory as any,
+      startDate: startDate ? new Date(startDate as string) : undefined,
+      endDate: endDate ? new Date(endDate as string) : undefined,
+    });
 
-      res.json({ count });
-    } catch (err: any) {
-      console.error('[Admin Routes] Count events error:', err);
-      res.status(500).json({ error: 'Failed to count events' });
-    }
+    res.json({ count });
+  } catch (err: any) {
+    console.error('[Admin Routes] Count events error:', err);
+    res.status(500).json({ error: 'Failed to count events' });
   }
-);
+});
 
 // ============================================
 // AUDIT LOGS (Admin only)
@@ -99,42 +84,29 @@ router.get(
  * GET /api/admin/audit
  * Query audit logs
  */
-router.get(
-  '/audit',
-  requireAdmin,
-  async (req: AuthenticatedRequest, res: Response) => {
-    try {
-      const {
-        actorId,
-        actorRole,
-        action,
-        targetType,
-        targetId,
-        startDate,
-        endDate,
-        limit,
-        offset,
-      } = req.query;
+router.get('/audit', requireAdmin, async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const { actorId, actorRole, action, targetType, targetId, startDate, endDate, limit, offset } =
+      req.query;
 
-      const logs = await queryAuditLogs({
-        actorId: actorId as string,
-        actorRole: actorRole as any,
-        action: action as string,
-        targetType: targetType as string,
-        targetId: targetId as string,
-        startDate: startDate ? new Date(startDate as string) : undefined,
-        endDate: endDate ? new Date(endDate as string) : undefined,
-        limit: limit ? parseInt(limit as string, 10) : 50,
-        offset: offset ? parseInt(offset as string, 10) : 0,
-      });
+    const logs = await queryAuditLogs({
+      actorId: actorId as string,
+      actorRole: actorRole as any,
+      action: action as string,
+      targetType: targetType as string,
+      targetId: targetId as string,
+      startDate: startDate ? new Date(startDate as string) : undefined,
+      endDate: endDate ? new Date(endDate as string) : undefined,
+      limit: limit ? parseInt(limit as string, 10) : 50,
+      offset: offset ? parseInt(offset as string, 10) : 0,
+    });
 
-      res.json(logs);
-    } catch (err: any) {
-      console.error('[Admin Routes] Query audit logs error:', err);
-      res.status(500).json({ error: 'Failed to query audit logs' });
-    }
+    res.json(logs);
+  } catch (err: any) {
+    console.error('[Admin Routes] Query audit logs error:', err);
+    res.status(500).json({ error: 'Failed to query audit logs' });
   }
-);
+});
 
 // ============================================
 // OUTCOMES (Admin/Support)
@@ -144,38 +116,26 @@ router.get(
  * GET /api/admin/outcomes
  * Query all outcomes
  */
-router.get(
-  '/outcomes',
-  requireSupport,
-  async (req: AuthenticatedRequest, res: Response) => {
-    try {
-      const {
-        driverId,
-        conversationId,
-        outcomeType,
-        startDate,
-        endDate,
-        limit,
-        offset,
-      } = req.query;
+router.get('/outcomes', requireSupport, async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const { driverId, conversationId, outcomeType, startDate, endDate, limit, offset } = req.query;
 
-      const outcomes = await queryOutcomes({
-        driverId: driverId as string,
-        conversationId: conversationId as string,
-        outcomeType: outcomeType as any,
-        startDate: startDate ? new Date(startDate as string) : undefined,
-        endDate: endDate ? new Date(endDate as string) : undefined,
-        limit: limit ? parseInt(limit as string, 10) : 50,
-        offset: offset ? parseInt(offset as string, 10) : 0,
-      });
+    const outcomes = await queryOutcomes({
+      driverId: driverId as string,
+      conversationId: conversationId as string,
+      outcomeType: outcomeType as any,
+      startDate: startDate ? new Date(startDate as string) : undefined,
+      endDate: endDate ? new Date(endDate as string) : undefined,
+      limit: limit ? parseInt(limit as string, 10) : 50,
+      offset: offset ? parseInt(offset as string, 10) : 0,
+    });
 
-      res.json(outcomes);
-    } catch (err: any) {
-      console.error('[Admin Routes] Query outcomes error:', err);
-      res.status(500).json({ error: 'Failed to query outcomes' });
-    }
+    res.json(outcomes);
+  } catch (err: any) {
+    console.error('[Admin Routes] Query outcomes error:', err);
+    res.status(500).json({ error: 'Failed to query outcomes' });
   }
-);
+});
 
 // ============================================
 // RAG DOCUMENTS (Admin only)
@@ -185,91 +145,114 @@ router.get(
  * GET /api/admin/documents
  * List RAG documents
  */
-router.get(
-  '/documents',
-  requireAdmin,
-  async (req: AuthenticatedRequest, res: Response) => {
-    try {
-      const { sourceType } = req.query;
-      const documents = await listDocuments(sourceType as any);
-      res.json(documents);
-    } catch (err: any) {
-      console.error('[Admin Routes] List documents error:', err);
-      res.status(500).json({ error: 'Failed to list documents' });
-    }
+router.get('/documents', requireAdmin, async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const { sourceType } = req.query;
+    const documents = await listDocuments(sourceType as any);
+    res.json(documents);
+  } catch (err: any) {
+    console.error('[Admin Routes] List documents error:', err);
+    res.status(500).json({ error: 'Failed to list documents' });
   }
-);
+});
 
 /**
  * POST /api/admin/documents
  * Index new RAG document
  */
-router.post(
-  '/documents',
-  requireAdmin,
-  async (req: AuthenticatedRequest, res: Response) => {
-    try {
-      const { title, content, sourceType, metadata } = req.body;
+router.post('/documents', requireAdmin, async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const { title, content, sourceType, metadata } = req.body;
 
-      if (!title || !content || !sourceType) {
-        return res.status(400).json({
-          error: 'title, content, and sourceType are required',
-        });
-      }
-
-      const document = await indexDocument({
-        title,
-        content,
-        sourceType,
-        metadata,
-        createdBy: req.userId,
+    if (!title || !content || !sourceType) {
+      return res.status(400).json({
+        error: 'title, content, and sourceType are required',
       });
-
-      logAuditAsync({
-        actorId: req.userId!,
-        actorRole: 'admin',
-        action: 'document.indexed',
-        targetType: 'document',
-        targetId: document.id,
-        details: { title, source_type: sourceType },
-      });
-
-      res.status(201).json(document);
-    } catch (err: any) {
-      console.error('[Admin Routes] Index document error:', err);
-      res.status(500).json({ error: 'Failed to index document' });
     }
+
+    const document = await indexDocument({
+      title,
+      content,
+      sourceType,
+      metadata,
+      createdBy: req.userId,
+    });
+
+    logAuditAsync({
+      actorId: req.userId!,
+      actorRole: 'admin',
+      action: 'document.indexed',
+      targetType: 'document',
+      targetId: document.id,
+      details: { title, source_type: sourceType },
+    });
+
+    res.status(201).json(document);
+  } catch (err: any) {
+    console.error('[Admin Routes] Index document error:', err);
+    res.status(500).json({ error: 'Failed to index document' });
   }
-);
+});
 
 /**
  * DELETE /api/admin/documents/:id
  * Delete RAG document (soft delete)
  */
-router.delete(
-  '/documents/:id',
-  requireAdmin,
-  async (req: AuthenticatedRequest, res: Response) => {
-    try {
-      const { id } = req.params;
+router.delete('/documents/:id', requireAdmin, async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const { id } = req.params;
 
-      await deleteDocument(id);
+    await deleteDocument(id);
 
-      logAuditAsync({
-        actorId: req.userId!,
-        actorRole: 'admin',
-        action: 'document.deleted',
-        targetType: 'document',
-        targetId: id,
-      });
+    logAuditAsync({
+      actorId: req.userId!,
+      actorRole: 'admin',
+      action: 'document.deleted',
+      targetType: 'document',
+      targetId: id,
+    });
 
-      res.json({ success: true });
-    } catch (err: any) {
-      console.error('[Admin Routes] Delete document error:', err);
-      res.status(500).json({ error: 'Failed to delete document' });
-    }
+    res.json({ success: true });
+  } catch (err: any) {
+    console.error('[Admin Routes] Delete document error:', err);
+    res.status(500).json({ error: 'Failed to delete document' });
   }
-);
+});
+
+// ============================================
+// RAG INGESTION (Admin only)
+// ============================================
+
+/**
+ * POST /api/admin/rag/ingest
+ * Ingest knowledge base documents into pgvector
+ */
+router.post('/rag/ingest', requireAdmin, async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const force = req.body?.force === true;
+    console.log(`[Admin] RAG ingestion triggered (force=${force})`);
+
+    const result = force ? await reingestKnowledgeBase() : await ingestKnowledgeBase();
+
+    logAuditAsync({
+      actorId: req.userId!,
+      actorRole: 'admin',
+      action: 'rag.ingestion',
+      targetType: 'knowledge_base',
+      targetId: 'v2',
+      details: { force, ...result },
+    });
+
+    res.json({
+      success: true,
+      message: force ? 'Réindexation complète terminée' : 'Ingestion terminée',
+      ...result,
+    });
+  } catch (err: any) {
+    console.error('[Admin Routes] RAG ingestion error:', err);
+    res.status(500).json({ error: `Ingestion failed: ${err.message}` });
+  }
+});
 
 // ============================================
 // USER MANAGEMENT (Admin only)
@@ -279,48 +262,44 @@ router.delete(
  * GET /api/admin/users
  * List users with roles
  */
-router.get(
-  '/users',
-  requireAdmin,
-  async (req: AuthenticatedRequest, res: Response) => {
-    try {
-      const supabase = getSupabaseAdmin();
-      const { limit, offset, role } = req.query;
+router.get('/users', requireAdmin, async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const supabase = getSupabaseAdmin();
+    const { limit, offset, role } = req.query;
 
-      let query = supabase
-        .from('user_roles')
-        .select('user_id, role, is_active, granted_at')
-        .eq('is_active', true)
-        .order('granted_at', { ascending: false });
+    let query = supabase
+      .from('user_roles')
+      .select('user_id, role, is_active, granted_at')
+      .eq('is_active', true)
+      .order('granted_at', { ascending: false });
 
-      if (role) {
-        query = query.eq('role', role);
-      }
-
-      if (limit) {
-        query = query.limit(parseInt(limit as string, 10));
-      }
-
-      if (offset) {
-        query = query.range(
-          parseInt(offset as string, 10),
-          parseInt(offset as string, 10) + parseInt((limit as string) || '50', 10) - 1
-        );
-      }
-
-      const { data, error } = await query;
-
-      if (error) {
-        throw error;
-      }
-
-      res.json(data);
-    } catch (err: any) {
-      console.error('[Admin Routes] List users error:', err);
-      res.status(500).json({ error: 'Failed to list users' });
+    if (role) {
+      query = query.eq('role', role);
     }
+
+    if (limit) {
+      query = query.limit(parseInt(limit as string, 10));
+    }
+
+    if (offset) {
+      query = query.range(
+        parseInt(offset as string, 10),
+        parseInt(offset as string, 10) + parseInt((limit as string) || '50', 10) - 1,
+      );
+    }
+
+    const { data, error } = await query;
+
+    if (error) {
+      throw error;
+    }
+
+    res.json(data);
+  } catch (err: any) {
+    console.error('[Admin Routes] List users error:', err);
+    res.status(500).json({ error: 'Failed to list users' });
   }
-);
+});
 
 /**
  * POST /api/admin/users/:userId/roles
@@ -350,7 +329,7 @@ router.post(
             granted_by: req.userId,
             is_active: true,
           },
-          { onConflict: 'user_id,role' }
+          { onConflict: 'user_id,role' },
         )
         .select()
         .single();
@@ -373,7 +352,7 @@ router.post(
       console.error('[Admin Routes] Grant role error:', err);
       res.status(500).json({ error: 'Failed to grant role' });
     }
-  }
+  },
 );
 
 /**
@@ -416,7 +395,7 @@ router.delete(
       console.error('[Admin Routes] Revoke role error:', err);
       res.status(500).json({ error: 'Failed to revoke role' });
     }
-  }
+  },
 );
 
 // ============================================
@@ -450,7 +429,7 @@ router.get(
       console.error('[Admin Routes] Get consents error:', err);
       res.status(500).json({ error: 'Failed to get consents' });
     }
-  }
+  },
 );
 
 // ============================================
@@ -461,42 +440,41 @@ router.get(
  * GET /api/admin/stats
  * System-wide statistics
  */
-router.get(
-  '/stats',
-  requireAdmin,
-  async (req: AuthenticatedRequest, res: Response) => {
-    try {
-      const supabase = getSupabaseAdmin();
+router.get('/stats', requireAdmin, async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const supabase = getSupabaseAdmin();
 
-      // Get counts from various tables
-      const [
-        { count: eventsCount },
-        { count: conversationsCount },
-        { count: outcomesCount },
-        { count: documentsCount },
-        { count: usersCount },
-      ] = await Promise.all([
-        supabase.from('events').select('id', { count: 'exact', head: true }),
-        supabase.from('ai_conversations').select('id', { count: 'exact', head: true }),
-        supabase.from('ai_outcomes').select('id', { count: 'exact', head: true }),
-        supabase.from('documents').select('id', { count: 'exact', head: true }).eq('is_active', true),
-        supabase.from('user_roles').select('user_id', { count: 'exact', head: true }).eq('is_active', true),
-      ]);
+    // Get counts from various tables
+    const [
+      { count: eventsCount },
+      { count: conversationsCount },
+      { count: outcomesCount },
+      { count: documentsCount },
+      { count: usersCount },
+    ] = await Promise.all([
+      supabase.from('events').select('id', { count: 'exact', head: true }),
+      supabase.from('ai_conversations').select('id', { count: 'exact', head: true }),
+      supabase.from('ai_outcomes').select('id', { count: 'exact', head: true }),
+      supabase.from('documents').select('id', { count: 'exact', head: true }).eq('is_active', true),
+      supabase
+        .from('user_roles')
+        .select('user_id', { count: 'exact', head: true })
+        .eq('is_active', true),
+    ]);
 
-      res.json({
-        events: eventsCount || 0,
-        conversations: conversationsCount || 0,
-        outcomes: outcomesCount || 0,
-        documents: documentsCount || 0,
-        users: usersCount || 0,
-        timestamp: new Date().toISOString(),
-      });
-    } catch (err: any) {
-      console.error('[Admin Routes] Get stats error:', err);
-      res.status(500).json({ error: 'Failed to get stats' });
-    }
+    res.json({
+      events: eventsCount || 0,
+      conversations: conversationsCount || 0,
+      outcomes: outcomesCount || 0,
+      documents: documentsCount || 0,
+      users: usersCount || 0,
+      timestamp: new Date().toISOString(),
+    });
+  } catch (err: any) {
+    console.error('[Admin Routes] Get stats error:', err);
+    res.status(500).json({ error: 'Failed to get stats' });
   }
-);
+});
 
 // ============================================
 // BACKGROUND JOBS (Admin only)
@@ -506,42 +484,38 @@ router.get(
  * POST /api/admin/jobs/features
  * Trigger daily features computation
  */
-router.post(
-  '/jobs/features',
-  requireAdmin,
-  async (req: AuthenticatedRequest, res: Response) => {
-    try {
-      const { runDailyFeaturesJob } = await import('../jobs/dailyFeatures.js');
+router.post('/jobs/features', requireAdmin, async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const { runDailyFeaturesJob } = await import('../jobs/dailyFeatures.js');
 
-      // Run job in background
-      runDailyFeaturesJob()
-        .then(result => {
-          console.log('[Admin] Daily features job completed:', result);
-        })
-        .catch(err => {
-          console.error('[Admin] Daily features job failed:', err);
-        });
-
-      logAuditAsync({
-        actorId: req.userId!,
-        actorRole: 'admin',
-        action: 'job.triggered',
-        targetType: 'job',
-        targetId: 'daily_features',
-        details: { triggered_by: 'admin_api' },
+    // Run job in background
+    runDailyFeaturesJob()
+      .then((result) => {
+        console.log('[Admin] Daily features job completed:', result);
+      })
+      .catch((err) => {
+        console.error('[Admin] Daily features job failed:', err);
       });
 
-      res.json({
-        success: true,
-        message: 'Daily features job started',
-        job: 'daily_features',
-      });
-    } catch (err: any) {
-      console.error('[Admin Routes] Trigger features job error:', err);
-      res.status(500).json({ error: 'Failed to trigger job' });
-    }
+    logAuditAsync({
+      actorId: req.userId!,
+      actorRole: 'admin',
+      action: 'job.triggered',
+      targetType: 'job',
+      targetId: 'daily_features',
+      details: { triggered_by: 'admin_api' },
+    });
+
+    res.json({
+      success: true,
+      message: 'Daily features job started',
+      job: 'daily_features',
+    });
+  } catch (err: any) {
+    console.error('[Admin Routes] Trigger features job error:', err);
+    res.status(500).json({ error: 'Failed to trigger job' });
   }
-);
+});
 
 /**
  * POST /api/admin/jobs/outcomes-timeout
@@ -556,10 +530,10 @@ router.post(
 
       // Run job in background
       runOutcomesTimeoutJob()
-        .then(result => {
+        .then((result) => {
           console.log('[Admin] Outcomes timeout job completed:', result);
         })
-        .catch(err => {
+        .catch((err) => {
           console.error('[Admin] Outcomes timeout job failed:', err);
         });
 
@@ -581,36 +555,32 @@ router.post(
       console.error('[Admin Routes] Trigger outcomes job error:', err);
       res.status(500).json({ error: 'Failed to trigger job' });
     }
-  }
+  },
 );
 
 /**
  * GET /api/admin/jobs
  * List available jobs
  */
-router.get(
-  '/jobs',
-  requireAdmin,
-  async (_req: AuthenticatedRequest, res: Response) => {
-    res.json({
-      jobs: [
-        {
-          id: 'daily_features',
-          name: 'Daily Features Computation',
-          description: 'Computes driver features for all active drivers',
-          schedule: '04:00 UTC daily',
-          endpoint: 'POST /api/admin/jobs/features',
-        },
-        {
-          id: 'outcomes_timeout',
-          name: 'Outcomes Timeout',
-          description: 'Marks pending outcomes > 24h as ignored',
-          schedule: '05:00 UTC daily',
-          endpoint: 'POST /api/admin/jobs/outcomes-timeout',
-        },
-      ],
-    });
-  }
-);
+router.get('/jobs', requireAdmin, async (_req: AuthenticatedRequest, res: Response) => {
+  res.json({
+    jobs: [
+      {
+        id: 'daily_features',
+        name: 'Daily Features Computation',
+        description: 'Computes driver features for all active drivers',
+        schedule: '04:00 UTC daily',
+        endpoint: 'POST /api/admin/jobs/features',
+      },
+      {
+        id: 'outcomes_timeout',
+        name: 'Outcomes Timeout',
+        description: 'Marks pending outcomes > 24h as ignored',
+        schedule: '05:00 UTC daily',
+        endpoint: 'POST /api/admin/jobs/outcomes-timeout',
+      },
+    ],
+  });
+});
 
 export { router as adminRouter };
