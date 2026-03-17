@@ -155,33 +155,43 @@ router.post('/send-otp', async (req: Request, res: Response) => {
       try {
         const message = `Votre code de vérification FOREAS est: ${code}. Valable 10 minutes.`;
 
-        // Strategy 1: Bird Verify API (works with "Verify API access" policy)
-        console.log(`[OTP] Trying Bird Verify API...`);
-        const verifyResponse = await fetch(`https://api.bird.com/workspaces/${BIRD_WORKSPACE_ID}/verify/messages/sms`, {
-          method: 'POST',
-          headers: {
-            'Authorization': `Bearer ${BIRD_API_KEY}`,
-            'Content-Type': 'application/json',
-          },
-          body: JSON.stringify({
-            to: normalizedPhone,
-            body: message,
-            sender: 'FOREAS',
-          }),
-        });
+        // Strategy 1: Bird Channels API (PRIMARY - per Bird docs, uses AccessKey auth)
+        if (BIRD_CHANNEL_ID) {
+          console.log(`[OTP] Trying Bird Channels API with AccessKey auth...`);
+          console.log(`[OTP] URL: ${BIRD_API_URL}/${BIRD_WORKSPACE_ID}/channels/${BIRD_CHANNEL_ID}/messages`);
+          console.log(`[OTP] Phone: ${normalizedPhone}`);
 
-        const verifyBody = await verifyResponse.text();
-        console.log(`[OTP] Bird Verify response: ${verifyResponse.status} ${verifyBody.substring(0, 500)}`);
+          // Try with AccessKey auth (per Bird API docs)
+          const channelResponse = await fetch(`${BIRD_API_URL}/${BIRD_WORKSPACE_ID}/channels/${BIRD_CHANNEL_ID}/messages`, {
+            method: 'POST',
+            headers: {
+              'Authorization': `AccessKey ${BIRD_API_KEY}`,
+              'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({
+              receiver: {
+                contacts: [{
+                  identifierValue: normalizedPhone,
+                }],
+              },
+              body: {
+                type: 'text',
+                text: { text: message },
+              },
+            }),
+          });
 
-        if (verifyResponse.ok) {
-          smsSent = true;
-          smsProvider = 'bird-verify';
-          console.log(`[OTP] ✅ SMS sent via Bird Verify to ${normalizedPhone.substring(0, 6)}...`);
-        } else {
-          // Strategy 2: Bird Channels API (needs "Channels" permission)
-          if (BIRD_CHANNEL_ID) {
-            console.log(`[OTP] Trying Bird Channels API...`);
-            const channelResponse = await fetch(`${BIRD_API_URL}/${BIRD_WORKSPACE_ID}/channels/${BIRD_CHANNEL_ID}/messages`, {
+          const channelBody = await channelResponse.text();
+          console.log(`[OTP] Bird Channels (AccessKey) response: ${channelResponse.status} ${channelBody.substring(0, 500)}`);
+
+          if (channelResponse.ok) {
+            smsSent = true;
+            smsProvider = 'bird-channels-accesskey';
+            console.log(`[OTP] ✅ SMS sent via Bird Channels (AccessKey) to ${normalizedPhone.substring(0, 6)}...`);
+          } else {
+            // Retry with Bearer auth in case AccessKey doesn't work
+            console.log(`[OTP] AccessKey failed, trying Bearer auth...`);
+            const channelResponse2 = await fetch(`${BIRD_API_URL}/${BIRD_WORKSPACE_ID}/channels/${BIRD_CHANNEL_ID}/messages`, {
               method: 'POST',
               headers: {
                 'Authorization': `Bearer ${BIRD_API_KEY}`,
@@ -191,7 +201,6 @@ router.post('/send-otp', async (req: Request, res: Response) => {
                 receiver: {
                   contacts: [{
                     identifierValue: normalizedPhone,
-                    identifierKey: 'phonenumber',
                   }],
                 },
                 body: {
@@ -201,43 +210,42 @@ router.post('/send-otp', async (req: Request, res: Response) => {
               }),
             });
 
-            const channelBody = await channelResponse.text();
-            console.log(`[OTP] Bird Channels response: ${channelResponse.status} ${channelBody.substring(0, 500)}`);
+            const channelBody2 = await channelResponse2.text();
+            console.log(`[OTP] Bird Channels (Bearer) response: ${channelResponse2.status} ${channelBody2.substring(0, 500)}`);
 
-            if (channelResponse.ok) {
+            if (channelResponse2.ok) {
               smsSent = true;
-              smsProvider = 'bird-channels';
-              console.log(`[OTP] ✅ SMS sent via Bird Channels to ${normalizedPhone.substring(0, 6)}...`);
+              smsProvider = 'bird-channels-bearer';
+              console.log(`[OTP] ✅ SMS sent via Bird Channels (Bearer) to ${normalizedPhone.substring(0, 6)}...`);
             }
           }
+        }
 
-          // Strategy 3: Legacy MessageBird REST API
-          if (!smsSent) {
-            console.log(`[OTP] Trying legacy MessageBird REST API...`);
-            const mbKey = process.env.MESSAGEBIRD_ACCESS_KEY || BIRD_API_KEY;
-            const mbResponse = await fetch('https://rest.messagebird.com/messages', {
-              method: 'POST',
-              headers: {
-                'Authorization': `AccessKey ${mbKey}`,
-                'Content-Type': 'application/json',
-              },
-              body: JSON.stringify({
-                originator: 'FOREAS',
-                recipients: [normalizedPhone.replace('+', '')],
-                body: `Votre code FOREAS: ${code}`,
-              }),
-            });
+        // Strategy 2: Bird Verify API (fallback)
+        if (!smsSent) {
+          console.log(`[OTP] Trying Bird Verify API...`);
+          const verifyResponse = await fetch(`https://api.bird.com/workspaces/${BIRD_WORKSPACE_ID}/verify/messages/sms`, {
+            method: 'POST',
+            headers: {
+              'Authorization': `AccessKey ${BIRD_API_KEY}`,
+              'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({
+              to: normalizedPhone,
+              body: message,
+              sender: 'FOREAS',
+            }),
+          });
 
-            const mbBody = await mbResponse.text();
-            console.log(`[OTP] MessageBird REST response: ${mbResponse.status} ${mbBody.substring(0, 500)}`);
+          const verifyBody = await verifyResponse.text();
+          console.log(`[OTP] Bird Verify response: ${verifyResponse.status} ${verifyBody.substring(0, 500)}`);
 
-            if (mbResponse.ok) {
-              smsSent = true;
-              smsProvider = 'messagebird-rest';
-              console.log(`[OTP] ✅ SMS sent via MessageBird REST`);
-            } else {
-              console.log(`[OTP] ❌ All SMS strategies failed. SMS NOT sent.`);
-            }
+          if (verifyResponse.ok) {
+            smsSent = true;
+            smsProvider = 'bird-verify';
+            console.log(`[OTP] ✅ SMS sent via Bird Verify to ${normalizedPhone.substring(0, 6)}...`);
+          } else {
+            console.log(`[OTP] ❌ All SMS strategies failed. SMS NOT sent.`);
           }
         }
       } catch (smsErr) {
