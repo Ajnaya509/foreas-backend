@@ -51,6 +51,9 @@ const BIRD_WORKSPACE_ID = process.env.BIRD_WORKSPACE_ID || 'default';
 const BIRD_CHANNEL_ID = process.env.BIRD_CHANNEL_ID || '';
 const BIRD_API_URL = 'https://api.bird.com/workspaces';
 
+// Log config at module load
+console.log(`[OTP] Config: BIRD_API_KEY=${BIRD_API_KEY ? `...${BIRD_API_KEY.slice(-6)}` : 'MISSING'}, WORKSPACE=${BIRD_WORKSPACE_ID}, CHANNEL=${BIRD_CHANNEL_ID || 'MISSING'}`);
+
 // Types
 interface SendOTPRequest {
   phone: string;
@@ -172,16 +175,21 @@ router.post('/send-otp', async (req: Request, res: Response) => {
           }),
         });
 
+        const birdBody = await response.text();
+        console.log(`[OTP] Bird API response: ${response.status} ${birdBody.substring(0, 500)}`);
+
         if (response.ok) {
           smsSent = true;
           smsProvider = 'bird';
           console.log(`[OTP] ✅ SMS sent via Bird to ${normalizedPhone.substring(0, 6)}...`);
         } else {
-          // Fallback MessageBird
+          console.log(`[OTP] ⚠️ Bird API failed (${response.status}), trying MessageBird REST fallback...`);
+          // Fallback MessageBird REST API (needs separate MESSAGEBIRD_ACCESS_KEY)
+          const mbKey = process.env.MESSAGEBIRD_ACCESS_KEY || BIRD_API_KEY;
           const mbResponse = await fetch('https://rest.messagebird.com/messages', {
             method: 'POST',
             headers: {
-              'Authorization': `AccessKey ${BIRD_API_KEY}`,
+              'Authorization': `AccessKey ${mbKey}`,
               'Content-Type': 'application/json',
             },
             body: JSON.stringify({
@@ -191,10 +199,15 @@ router.post('/send-otp', async (req: Request, res: Response) => {
             }),
           });
 
+          const mbBody = await mbResponse.text();
+          console.log(`[OTP] MessageBird response: ${mbResponse.status} ${mbBody.substring(0, 500)}`);
+
           if (mbResponse.ok) {
             smsSent = true;
             smsProvider = 'messagebird';
             console.log(`[OTP] ✅ SMS sent via MessageBird fallback`);
+          } else {
+            console.log(`[OTP] ❌ Both Bird and MessageBird failed. SMS NOT sent.`);
           }
         }
       } catch (smsErr) {
@@ -217,6 +230,8 @@ router.post('/send-otp', async (req: Request, res: Response) => {
       sessionToken,
       expiresIn: 600, // 10 minutes
       rateLimitRemaining: rateLimit.remaining,
+      smsSent,
+      smsProvider,
       ...(isDev && !smsSent ? { devCode: code } : {}),
     });
 
