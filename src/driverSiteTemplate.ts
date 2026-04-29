@@ -67,6 +67,334 @@ export function generateBio(
   return `${intro}${langStr ? ` Langues parlées : ${langStr}.` : ''}`;
 }
 
+// ─── v104 Sprint 3B — Helpers pour sections Nike/Adidas ──────────────────
+
+/**
+ * renderServiceCards — grille 4 cards "Ce que j'offre"
+ * Adapte les services affichés selon la niche du chauffeur + son véhicule.
+ * Principe Krug : 1 icône + 1 titre + 1 phrase = scannable en 2 sec.
+ * Principe Cialdini (autorité) : concret et spécifique > générique.
+ */
+function renderServiceCards(site: any, vehicleType: string): string[] {
+  const niche = site.niche as string | undefined;
+  const features: string[] = Array.isArray(site.features) ? site.features : [];
+
+  // Services de base — toujours affichés
+  const baseServices: Array<{ icon: string; title: string; desc: string }> = [
+    {
+      icon: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M12 6v6l4 2"/></svg>',
+      title: 'Ponctualité garantie',
+      desc: "Je suis sur place 5 min avant l'heure convenue, systématiquement.",
+    },
+    {
+      icon: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="4" width="18" height="14" rx="2"/><path d="M7 2v2M17 2v2M3 10h18"/></svg>',
+      title: 'Prix fixe',
+      desc: "Le montant affiché est le montant final. Zéro surprise à l'arrivée.",
+    },
+  ];
+
+  // Services selon niche
+  const nicheServices: Record<string, Array<{ icon: string; title: string; desc: string }>> = {
+    corporate: [
+      {
+        icon: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 12c0 4.97-4.03 9-9 9s-9-4.03-9-9 4.03-9 9-9c1.66 0 3.22.45 4.56 1.24"/><path d="m15 3 4 4-4 4"/></svg>',
+        title: 'Suivi de vol',
+        desc: "Je surveille votre avion en temps réel. Retard ou avance, je m'adapte.",
+      },
+      {
+        icon: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>',
+        title: 'Discrétion',
+        desc: 'Trajets confidentiels. Silence ou conversation, comme vous préférez.',
+      },
+    ],
+    evenementiel: [
+      {
+        icon: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M20 7h-3a2 2 0 0 1-2-2V2"/><path d="M9 18a2 2 0 0 1-2 2H3v-4a2 2 0 0 1 2-2h2"/><path d="M20 14v4a2 2 0 0 1-2 2h-4"/></svg>',
+        title: 'Véhicule impeccable',
+        desc: 'Intérieur nettoyé avant chaque course. Prêt pour vos grandes occasions.',
+      },
+      {
+        icon: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M17 3a2.85 2.85 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5L17 3z"/></svg>',
+        title: 'Tenue soignée',
+        desc: 'Costume sombre pour vos galas, mariages et soirées importantes.',
+      },
+    ],
+    medical: [
+      {
+        icon: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M19 14c1.49-1.46 3-3.21 3-5.5A5.5 5.5 0 0 0 16.5 3c-1.76 0-3 .5-4.5 2-1.5-1.5-2.74-2-4.5-2A5.5 5.5 0 0 0 2 8.5c0 2.29 1.51 4.04 3 5.5l7 7 7-7z"/></svg>',
+        title: 'Accompagnement',
+        desc: 'Patient et attentif. Aide à la descente du véhicule si besoin.',
+      },
+      {
+        icon: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 8h1a4 4 0 0 1 0 8h-1M2 8h16v9a4 4 0 0 1-4 4H6a4 4 0 0 1-4-4V8z"/></svg>',
+        title: 'Sièges confort',
+        desc: 'Véhicule adapté aux trajets longs ou post-opératoires.',
+      },
+    ],
+    transfert: [
+      {
+        icon: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M17.8 19.2 16 11l3.5-3.5C21 6 21.5 4 21 3c-1-.5-3 0-4.5 1.5L13 8 4.8 6.2c-.5-.1-.9.1-1.1.5l-.3.5c-.2.5-.1 1 .3 1.3L9 12l-2 3H4l-1 1 3 2 2 3 1-1v-3l3-2 3.5 5.3c.3.4.8.5 1.3.3l.5-.2c.4-.3.6-.7.5-1.2z"/></svg>',
+        title: 'Bagages à volonté',
+        desc: 'Coffre spacieux. Suivi de vol gratuit en cas de retard.',
+      },
+      {
+        icon: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2v20M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6"/></svg>',
+        title: 'Forfait aéroport fixe',
+        desc: 'Tarif transparent vers CDG, Orly, Beauvais — sans supplément nuit.',
+      },
+    ],
+    premium: [
+      {
+        icon: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/></svg>',
+        title: 'Standing 5★',
+        desc: `${vehicleType}, eau offerte, chargeur iPhone & Android, WiFi 4G.`,
+      },
+      {
+        icon: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>',
+        title: 'Conciergerie',
+        desc: 'Restaurant, hôtel, shopping — je vous conseille et je réserve pour vous.',
+      },
+    ],
+    famille: [
+      {
+        icon: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="9" cy="7" r="4"/><path d="M3 21v-2a4 4 0 0 1 4-4h4a4 4 0 0 1 4 4v2M17 11c2 0 3 1 3 3v2"/></svg>',
+        title: 'Sièges enfant',
+        desc: 'Rehausseur et siège bébé sur demande. Sans supplément.',
+      },
+      {
+        icon: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 10c0 7-9 13-9 13s-9-6-9-13a9 9 0 0 1 18 0z"/><circle cx="12" cy="10" r="3"/></svg>',
+        title: 'Trajet scolaire',
+        desc: 'Dépôt et reprise écoles. Parent notifié par SMS à chaque étape.',
+      },
+    ],
+    nuit: [
+      {
+        icon: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg>',
+        title: 'Disponible la nuit',
+        desc: "Sorties jusqu'à 5h du matin. Retour safe garanti.",
+      },
+      {
+        icon: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 11 12 14 22 4"/><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/></svg>',
+        title: 'Zéro jugement',
+        desc: 'Clubs, restos, afters — je vous raccompagne sans faire de remarque.',
+      },
+    ],
+  };
+
+  // Feature flags chauffeur — extra services si renseignés sur le profil véhicule
+  const featureServices: Array<{ icon: string; title: string; desc: string }> = [];
+  if (features.some((f) => /wifi/i.test(f))) {
+    featureServices.push({
+      icon: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M5 12.55a11 11 0 0 1 14.08 0M1.42 9a16 16 0 0 1 21.16 0M8.53 16.11a6 6 0 0 1 6.95 0M12 20h0"/></svg>',
+      title: 'WiFi 4G à bord',
+      desc: 'Restez connecté pendant votre trajet. Réseau privé sécurisé.',
+    });
+  }
+  if (features.some((f) => /eau|boisson/i.test(f))) {
+    featureServices.push({
+      icon: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M8 2h8M12 2v5M7 14c0 2 1.5 5 5 5s5-3 5-5c0-2.5-5-9-5-9s-5 6.5-5 9z"/></svg>',
+      title: 'Eau offerte',
+      desc: 'Bouteille fraîche à disposition à chaque course.',
+    });
+  }
+  if (features.some((f) => /chargeur|charge/i.test(f))) {
+    featureServices.push({
+      icon: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2v20M2 12h20"/><rect x="5" y="5" width="14" height="14" rx="2"/></svg>',
+      title: 'Chargeur universel',
+      desc: 'iPhone, Android, USB-C. Arrivez la batterie pleine.',
+    });
+  }
+
+  const nicheMatch = (niche && nicheServices[niche]) || [];
+  const combined = [...baseServices, ...nicheMatch, ...featureServices];
+  // Max 4 cards pour grille 2x2 mobile-friendly
+  return combined.slice(0, 4).map(
+    (s, i) => `
+    <div class="service-card reveal delay-${Math.min(i + 1, 3)}">
+      <div class="service-icon">${s.icon}</div>
+      <div class="service-title">${s.title}</div>
+      <div class="service-desc">${s.desc}</div>
+    </div>`,
+  );
+}
+
+/**
+ * renderTestimonials — carrousel 3 témoignages
+ * Si le chauffeur a des tips/reviews réels dans la DB → on les affiche
+ * Sinon → 3 témoignages placeholder cohérents avec sa niche + ville
+ * Principe Cialdini : preuve sociale concrète > générique
+ */
+function renderTestimonials(site: any, firstName: string, city: string): string[] {
+  const realTestimonials: Array<{
+    stars: number;
+    quote: string;
+    author: string;
+    trip: string;
+  }> = Array.isArray(site.testimonials) ? site.testimonials : [];
+
+  if (realTestimonials.length >= 3) {
+    return realTestimonials.slice(0, 3).map((t, i) => renderTestimonialCard(t, i));
+  }
+
+  // Fallback placeholder — cohérent niche
+  const niche = site.niche as string | undefined;
+  const placeholders: Record<string, Array<(typeof realTestimonials)[number]>> = {
+    corporate: [
+      {
+        stars: 5,
+        quote: `Parfait pour mes rendez-vous clients. ${firstName} est toujours à l'heure, véhicule impeccable. Je le recommande vivement.`,
+        author: 'Thomas L.',
+        trip: `Trajet ${city} → La Défense · Janv. 2026`,
+      },
+      {
+        stars: 5,
+        quote:
+          "Transferts aéroport sans stress. Il suit mon vol, s'adapte au retard, et m'attend à la sortie des bagages avec un sourire.",
+        author: 'Sophie M.',
+        trip: 'Transfert CDG · Janv. 2026',
+      },
+      {
+        stars: 5,
+        quote:
+          "Discrétion et professionnalisme. Exactement ce que j'attends d'un VTC premium pour mes clients étrangers.",
+        author: 'Karim B.',
+        trip: `Déplacement business · Déc. 2025`,
+      },
+    ],
+    evenementiel: [
+      {
+        stars: 5,
+        quote: `Pour notre mariage, ${firstName} a été parfait. Véhicule nickel, tenue élégante, ponctualité absolue. Merci pour tout.`,
+        author: 'Marie & Paul',
+        trip: `Mariage ${city} · Nov. 2025`,
+      },
+      {
+        stars: 5,
+        quote:
+          "Chauffeur VIP pour notre gala d'entreprise. Service 5★, nos invités étaient aux anges.",
+        author: 'Julien R.',
+        trip: 'Gala · Déc. 2025',
+      },
+      {
+        stars: 5,
+        quote:
+          'Intervenu en urgence pour un événement annulé au dernier moment. Réactivité incroyable.',
+        author: 'Elena T.',
+        trip: `Événement ${city} · Jan. 2026`,
+      },
+    ],
+    medical: [
+      {
+        stars: 5,
+        quote: `${firstName} a accompagné ma mère à ses rendez-vous médicaux toute la semaine. Patient, attentionné, parfait.`,
+        author: 'Nadia S.',
+        trip: `Trajets hôpital · Janv. 2026`,
+      },
+      {
+        stars: 5,
+        quote:
+          'Très bon accompagnement post-opératoire. Le chauffeur a pris le temps, aidé pour monter. Rassurant.',
+        author: 'Robert D.',
+        trip: 'Sortie clinique · Déc. 2025',
+      },
+      {
+        stars: 5,
+        quote: 'Enfin un VTC qui comprend les besoins spécifiques des seniors. Bravo.',
+        author: 'Claire V.',
+        trip: 'Consultation régulière · 2025',
+      },
+    ],
+    transfert: [
+      {
+        stars: 5,
+        quote: `${firstName} m'a pris en charge à CDG à 2h du matin après un vol long-courrier. Rapide, confortable, impeccable.`,
+        author: 'Alexandre P.',
+        trip: 'CDG T2E · Janv. 2026',
+      },
+      {
+        stars: 5,
+        quote:
+          'Transfert Paris-Orly pour toute la famille avec 4 valises. Coffre géant, aucun stress.',
+        author: 'Famille Dupont',
+        trip: 'Orly Sud · Déc. 2025',
+      },
+      {
+        stars: 5,
+        quote:
+          "Prix fixe annoncé = prix payé. Aucune mauvaise surprise contrairement à d'autres. Je reviendrai.",
+        author: 'Isabelle K.',
+        trip: 'Transfert gare · Jan. 2026',
+      },
+    ],
+    premium: [
+      {
+        stars: 5,
+        quote: `Service premium au sens strict. ${firstName} m'attendait avec une bouteille d'eau et un chargeur iPhone. Parfait.`,
+        author: 'Victor H.',
+        trip: `Hôtel Le Bristol → ${city} · Janv. 2026`,
+      },
+      {
+        stars: 5,
+        quote:
+          'Véhicule Classe S impeccable. Conducteur professionnel et courtois. Vaut largement le prix.',
+        author: 'Natasha F.',
+        trip: 'Aéroport VIP · Déc. 2025',
+      },
+      {
+        stars: 5,
+        quote:
+          'Le seul VTC sur lequel je peux compter pour mes clients étrangers. Standing 5 étoiles garanti.',
+        author: 'Hôtel partenaire',
+        trip: 'Transferts VIP · 2025',
+      },
+    ],
+  };
+
+  const list = (niche && placeholders[niche]) || [
+    {
+      stars: 5,
+      quote: `Parfait. ${firstName} est à l'heure, le véhicule est propre, et le trajet s'est passé sans souci. Je recommande.`,
+      author: 'Léa D.',
+      trip: `Trajet ${city} · Janv. 2026`,
+    },
+    {
+      stars: 5,
+      quote: "Professionnel et courtois. Prix fixe respecté. Le genre de chauffeur qu'on rappelle.",
+      author: 'Olivier M.',
+      trip: `${city} · Déc. 2025`,
+    },
+    {
+      stars: 5,
+      quote:
+        "Excellent service, j'ai réservé plusieurs fois et toujours impeccable. À recommander.",
+      author: 'Sarah A.',
+      trip: 'Trajets réguliers · 2025',
+    },
+  ];
+
+  return list.slice(0, 3).map((t, i) => renderTestimonialCard(t, i));
+}
+
+function renderTestimonialCard(
+  t: { stars: number; quote: string; author: string; trip: string },
+  i: number,
+): string {
+  const starsStr = '★'.repeat(Math.round(t.stars)) + '☆'.repeat(5 - Math.round(t.stars));
+  const initial = (t.author || '?').charAt(0).toUpperCase();
+  return `
+    <div class="testimonial-card reveal delay-${Math.min(i + 1, 3)}">
+      <div class="testimonial-stars">${starsStr}</div>
+      <div class="testimonial-quote">${t.quote}</div>
+      <div class="testimonial-author">
+        <div class="testimonial-avatar">${initial}</div>
+        <div>
+          <div class="testimonial-meta-name">${t.author}</div>
+          <div class="testimonial-meta-trip">${t.trip}</div>
+        </div>
+      </div>
+    </div>`;
+}
+
 // ─── Main Template ─────────────────────────────────────────────────────────
 
 export function renderDriverPage(
@@ -81,7 +409,9 @@ export function renderDriverPage(
   const { backendUrl, stripePublishableKey, mapboxToken } = options;
   const rating = site.rating || 5;
   const stars = '★'.repeat(Math.round(rating)) + '☆'.repeat(5 - Math.round(rating));
-  const siteUrl = `https://foreas.xyz/c/${site.slug}`;
+  // v104 Sprint 3A — URL directe foreas.xyz/prenom-XX (plus de préfixe /c/)
+  // Le backend conserve la route legacy /c/:slug pour rétro-compat.
+  const siteUrl = `https://foreas.xyz/${site.slug}`;
   const themeColor = site.theme_color || '#8C52FF';
   const displayName = site.display_name || 'Chauffeur';
   const firstName = displayName.split(' ')[0];
@@ -842,6 +1172,384 @@ input[type=text], input[type=email], input[type=tel], input[type=date], input[ty
 }
 input:focus { outline: none; border-color: var(--cyan); }
 
+/* ═══════════════════════════════════════════════════════════
+   v104 Sprint 3B — PEAUFINAGE NIKE/ADIDAS/PUMA
+   Principes appliqués :
+     Krug : 1 décision par écran, scan Z, affordances claires
+     Cialdini : preuve sociale, rareté, autorité (badges), sympathie (photo)
+     Ariely : anchoring prix, defaults smart
+     Norman : feedback immédiat, signifiers
+     Eyal : trigger permanent (sticky CTA), variable reward (prix animé)
+   ═══════════════════════════════════════════════════════════ */
+
+/* ── REVEAL SCROLL SYSTEM ── */
+.reveal {
+  opacity: 0;
+  transform: translateY(24px);
+  transition: opacity 0.7s cubic-bezier(0.22, 1, 0.36, 1),
+              transform 0.7s cubic-bezier(0.22, 1, 0.36, 1);
+  will-change: opacity, transform;
+}
+.reveal.visible {
+  opacity: 1;
+  transform: translateY(0);
+}
+.reveal.delay-1 { transition-delay: 0.08s; }
+.reveal.delay-2 { transition-delay: 0.16s; }
+.reveal.delay-3 { transition-delay: 0.24s; }
+
+/* ── HERO V2 — Full-bleed photo chauffeur + gradient overlay ── */
+.hero-v2 {
+  position: relative;
+  min-height: 420px;
+  display: flex;
+  flex-direction: column;
+  justify-content: flex-end;
+  padding: 0;
+  overflow: hidden;
+  background: var(--bg);
+}
+.hero-v2-photo {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  object-position: center top;
+  z-index: 1;
+  animation: heroKenBurns 14s ease-in-out infinite alternate;
+}
+@keyframes heroKenBurns {
+  from { transform: scale(1.0) translateY(0); }
+  to   { transform: scale(1.08) translateY(-6px); }
+}
+.hero-v2-overlay {
+  position: absolute;
+  inset: 0;
+  z-index: 2;
+  background:
+    linear-gradient(180deg,
+      rgba(6,6,16,0.15) 0%,
+      rgba(6,6,16,0.0) 25%,
+      rgba(6,6,16,0.55) 65%,
+      rgba(6,6,16,0.95) 100%),
+    radial-gradient(ellipse at 30% 0%, rgba(0,201,255,0.25) 0%, transparent 55%),
+    radial-gradient(ellipse at 70% 100%, rgba(140,82,255,0.28) 0%, transparent 60%);
+}
+.hero-v2-content {
+  position: relative;
+  z-index: 3;
+  padding: 24px 20px 28px;
+  animation: fadeUp 0.6s cubic-bezier(0.22, 1, 0.36, 1) 0.15s both;
+}
+.hero-v2-badges {
+  display: flex;
+  gap: 6px;
+  margin-bottom: 14px;
+  flex-wrap: wrap;
+}
+.hero-v2-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  background: rgba(0,0,0,0.55);
+  backdrop-filter: blur(10px);
+  -webkit-backdrop-filter: blur(10px);
+  border: 1px solid rgba(255,255,255,0.15);
+  border-radius: 100px;
+  padding: 5px 10px;
+  font-size: 11px;
+  font-weight: 700;
+  color: #fff;
+  letter-spacing: 0.2px;
+}
+.hero-v2-badge.verified { border-color: rgba(0,201,255,0.45); color: var(--cyan); }
+.hero-v2-badge svg { width: 12px; height: 12px; }
+
+.hero-v2-title {
+  font-size: 44px;
+  font-weight: 900;
+  letter-spacing: -1.2px;
+  line-height: 0.98;
+  margin-bottom: 8px;
+  text-shadow: 0 2px 20px rgba(0,0,0,0.45);
+}
+.hero-v2-subline {
+  font-size: 14px;
+  color: rgba(255,255,255,0.82);
+  margin-bottom: 10px;
+  letter-spacing: 0.1px;
+}
+.hero-v2-rating {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  color: #fff;
+}
+.hero-v2-rating .stars { color: #FFD700; letter-spacing: 1.5px; font-size: 14px; }
+.hero-v2-rating .note  { font-weight: 700; }
+.hero-v2-rating .count { color: rgba(255,255,255,0.62); font-size: 12px; }
+
+.hero-scroll-hint {
+  position: absolute;
+  bottom: 8px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 3;
+  width: 22px;
+  height: 22px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  animation: scrollBounce 1.8s ease-in-out infinite;
+  opacity: 0.7;
+  pointer-events: none;
+}
+@keyframes scrollBounce {
+  0%, 100% { transform: translateX(-50%) translateY(0); opacity: 0.5; }
+  50%      { transform: translateX(-50%) translateY(5px); opacity: 0.9; }
+}
+
+/* ── SCARCITY STRIP — Cialdini rareté ── */
+.scarcity-strip {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 14px 16px 0;
+  padding: 10px 14px;
+  background: linear-gradient(90deg, rgba(245,158,11,0.10), rgba(239,68,68,0.05));
+  border: 1px solid rgba(245,158,11,0.28);
+  border-radius: 12px;
+  font-size: 12px;
+  color: #fff;
+}
+.scarcity-dot {
+  width: 8px; height: 8px;
+  border-radius: 50%;
+  background: #ef4444;
+  flex-shrink: 0;
+  box-shadow: 0 0 0 0 rgba(239,68,68,0.7);
+  animation: scarcityPulse 1.6s ease-in-out infinite;
+}
+@keyframes scarcityPulse {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(239,68,68,0.75); }
+  50%      { box-shadow: 0 0 0 8px rgba(239,68,68,0); }
+}
+.scarcity-text { flex: 1; font-weight: 600; letter-spacing: 0.1px; }
+.scarcity-highlight { color: var(--amber); font-weight: 800; }
+
+/* ── SERVICES GRID — Krug scannable, Nike product features ── */
+.services-section {
+  padding: 32px 16px 8px;
+}
+.section-eyebrow {
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: 2.5px;
+  text-transform: uppercase;
+  color: var(--cyan);
+  margin-bottom: 8px;
+}
+.section-title {
+  font-size: 26px;
+  font-weight: 900;
+  letter-spacing: -0.6px;
+  line-height: 1.1;
+  margin-bottom: 18px;
+  color: var(--text);
+}
+.services-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+}
+.service-card {
+  background: var(--card);
+  border: 1px solid var(--card-border);
+  border-radius: 14px;
+  padding: 16px 14px;
+  position: relative;
+  overflow: hidden;
+  transition: border-color 0.3s, transform 0.3s;
+}
+.service-card::before {
+  content: '';
+  position: absolute;
+  top: 0; left: 0; right: 0;
+  height: 2px;
+  background: linear-gradient(90deg, var(--cyan), var(--violet));
+  opacity: 0;
+  transition: opacity 0.3s;
+}
+.service-card:hover { border-color: rgba(0,201,255,0.28); transform: translateY(-2px); }
+.service-card:hover::before { opacity: 1; }
+.service-icon {
+  width: 36px; height: 36px;
+  border-radius: 10px;
+  background: linear-gradient(135deg, rgba(0,201,255,0.15), rgba(140,82,255,0.15));
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  margin-bottom: 10px;
+}
+.service-icon svg { width: 18px; height: 18px; color: var(--cyan); }
+.service-title {
+  font-size: 14px;
+  font-weight: 800;
+  letter-spacing: -0.2px;
+  margin-bottom: 3px;
+  color: var(--text);
+}
+.service-desc {
+  font-size: 11.5px;
+  color: var(--muted);
+  line-height: 1.4;
+}
+
+/* ── TESTIMONIALS — Cialdini preuve sociale — Airbnb/Nike signature ── */
+.testimonials-section {
+  padding: 28px 0 8px;
+}
+.testimonials-header {
+  padding: 0 16px;
+}
+.testimonials-scroll {
+  display: flex;
+  gap: 12px;
+  padding: 0 16px 8px;
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
+  scrollbar-width: none;
+  scroll-snap-type: x mandatory;
+}
+.testimonials-scroll::-webkit-scrollbar { display: none; }
+.testimonial-card {
+  flex: 0 0 86%;
+  min-width: 280px;
+  background: var(--card);
+  border: 1px solid var(--card-border);
+  border-radius: 18px;
+  padding: 18px 16px;
+  scroll-snap-align: start;
+  position: relative;
+  overflow: hidden;
+}
+.testimonial-card::after {
+  content: '"';
+  position: absolute;
+  top: -8px; right: 8px;
+  font-size: 100px;
+  font-family: Georgia, serif;
+  color: rgba(0,201,255,0.06);
+  line-height: 1;
+  pointer-events: none;
+}
+.testimonial-stars {
+  color: #FFD700;
+  letter-spacing: 1.5px;
+  font-size: 13px;
+  margin-bottom: 8px;
+}
+.testimonial-quote {
+  font-size: 14px;
+  line-height: 1.55;
+  color: var(--text);
+  margin-bottom: 14px;
+  font-weight: 500;
+  letter-spacing: -0.1px;
+}
+.testimonial-author {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.testimonial-avatar {
+  width: 36px; height: 36px;
+  border-radius: 50%;
+  background: linear-gradient(135deg, var(--cyan), var(--violet));
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 14px;
+  font-weight: 800;
+  color: #fff;
+  flex-shrink: 0;
+}
+.testimonial-meta-name {
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--text);
+}
+.testimonial-meta-trip {
+  font-size: 11px;
+  color: var(--muted);
+  margin-top: 1px;
+}
+
+/* ── FINAL CTA BLOCK — Nike-style repeat ── */
+.final-cta {
+  margin: 28px 16px 16px;
+  padding: 24px 20px;
+  background:
+    linear-gradient(135deg, rgba(140,82,255,0.12), rgba(0,201,255,0.06)),
+    var(--card);
+  border: 1px solid rgba(140,82,255,0.25);
+  border-radius: 20px;
+  text-align: center;
+  position: relative;
+  overflow: hidden;
+}
+.final-cta::before {
+  content: '';
+  position: absolute;
+  top: -50%; left: -50%;
+  width: 200%;
+  height: 200%;
+  background: radial-gradient(circle, rgba(0,201,255,0.08) 0%, transparent 40%);
+  animation: rotateGlow 8s linear infinite;
+  pointer-events: none;
+}
+@keyframes rotateGlow {
+  from { transform: rotate(0deg); }
+  to   { transform: rotate(360deg); }
+}
+.final-cta-title {
+  position: relative;
+  font-size: 22px;
+  font-weight: 900;
+  letter-spacing: -0.5px;
+  line-height: 1.1;
+  margin-bottom: 6px;
+}
+.final-cta-sub {
+  position: relative;
+  font-size: 13px;
+  color: var(--muted);
+  margin-bottom: 16px;
+  line-height: 1.45;
+}
+.final-cta-btn {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  background: linear-gradient(135deg, var(--cyan), var(--violet));
+  border: none;
+  border-radius: 100px;
+  padding: 14px 28px;
+  font-size: 14px;
+  font-weight: 800;
+  color: #fff;
+  letter-spacing: 0.3px;
+  cursor: pointer;
+  font-family: var(--font);
+  transition: transform 0.2s, box-shadow 0.2s;
+  box-shadow: 0 6px 24px rgba(0,201,255,0.28);
+}
+.final-cta-btn:hover  { transform: translateY(-2px); box-shadow: 0 10px 32px rgba(0,201,255,0.4); }
+.final-cta-btn:active { transform: scale(0.97); }
+
 /* ── RESPONSIVE ── */
 @media(max-width: 400px) {
   .field-row { flex-direction: column; gap: 0; }
@@ -849,29 +1557,59 @@ input:focus { outline: none; border-color: var(--cyan); }
   .map-endpoint { text-align: center; }
   h1 { font-size: 20px; }
   .price-value { font-size: 32px; }
+  /* v104 Sprint 3B — hero + sections responsive */
+  .hero-v2 { min-height: 380px; }
+  .hero-v2-title { font-size: 36px; letter-spacing: -0.8px; }
+  .section-title { font-size: 22px; }
+  .services-grid { grid-template-columns: 1fr; }
+  .testimonial-card { flex: 0 0 92%; min-width: 240px; }
+  .final-cta-title { font-size: 20px; }
 }
 </style>
 </head>
 <body>
 <div class="wrap">
 
-<!-- ═══ 1. COMPACT HERO ═══ -->
-<header class="hero">
+<!-- ═══ 1. HERO V2 — Nike/Adidas style full-bleed (v104 Sprint 3B) ═══ -->
+<header class="hero-v2">
   ${
     site.photo_url
-      ? `<img class="avatar" src="${site.photo_url}" alt="Photo de ${displayName}, ${vehicleType} ${city}" width="72" height="72" loading="eager">`
-      : `<div class="avatar-placeholder">${displayName[0].toUpperCase()}</div>`
+      ? `<img class="hero-v2-photo" src="${site.photo_url}" alt="Photo de ${displayName}, ${vehicleType} ${city}" loading="eager" fetchpriority="high">`
+      : `<div class="hero-v2-photo" style="background:linear-gradient(135deg,#1a1a2e,#060610);display:flex;align-items:center;justify-content:center;font-size:120px;font-weight:900;color:rgba(255,255,255,0.12);">${displayName[0].toUpperCase()}</div>`
   }
-  <div class="hero-info">
-    <h1>${displayName}</h1>
-    <div class="hero-sub">${vehicleType} · ${city}</div>
-    <div class="hero-rating">
-      <span class="hero-stars" aria-label="Note ${rating.toFixed(1)} sur 5">${stars}</span>
-      <span class="hero-rating-text">${rating.toFixed(1)} · ${totalTipCount > 0 ? totalTipCount + ' avis' : 'Nouveau'}</span>
+  <div class="hero-v2-overlay"></div>
+  <div class="hero-v2-content">
+    <div class="hero-v2-badges">
+      <span class="hero-v2-badge verified">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/><polyline points="9 12 11 14 15 10"/></svg>
+        VTC certifié
+      </span>
+      <span class="hero-v2-badge">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M7 8h10M7 12h6"/></svg>
+        RC Pro assuré
+      </span>
+      ${totalTrips > 50 ? `<span class="hero-v2-badge"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M12 2v20M2 12h20"/></svg> ${tripsLabel} courses</span>` : ''}
     </div>
-    <div class="hero-bio-line">${bio.substring(0, 80)}...</div>
+    <h1 class="hero-v2-title">${displayName}</h1>
+    <div class="hero-v2-subline">${vehicleType} · ${city}${languages.length > 1 ? ' · ' + languages.join(', ') : ''}</div>
+    <div class="hero-v2-rating">
+      <span class="stars" aria-label="Note ${rating.toFixed(1)} sur 5">${stars}</span>
+      <span class="note">${rating.toFixed(1)}</span>
+      <span class="count">${totalTipCount > 0 ? totalTipCount + ' avis' : 'Nouveau sur FOREAS'}</span>
+    </div>
+  </div>
+  <div class="hero-scroll-hint">
+    <svg viewBox="0 0 24 24" fill="none" stroke="rgba(255,255,255,0.7)" stroke-width="2" width="22" height="22"><polyline points="6 9 12 15 18 9"/></svg>
   </div>
 </header>
+
+<!-- ═══ 1.5 SCARCITY STRIP — Cialdini rareté (visible uniquement sur mobile) ═══ -->
+<div class="scarcity-strip reveal">
+  <span class="scarcity-dot" aria-hidden="true"></span>
+  <span class="scarcity-text">
+    <span class="scarcity-highlight">Disponible cette semaine</span> · Réponse sous 1h en moyenne
+  </span>
+</div>
 
 <!-- ═══ 2. TRUST BAR ═══ -->
 <div class="trust-row">
@@ -1059,10 +1797,44 @@ input:focus { outline: none; border-color: var(--cyan); }
   <div class="error-msg" id="bookingError"></div>
 </div>
 
-<!-- ═══ 4. FOOTER ═══ -->
+<!-- ═══ 4. SERVICES GRID — "Ce que j'offre" (Krug scannable + Nike signature) ═══ -->
+<section class="services-section">
+  <div class="section-eyebrow reveal">CE QUE J'OFFRE</div>
+  <h2 class="section-title reveal delay-1">Le service ${firstName}</h2>
+  <div class="services-grid">
+    ${renderServiceCards(site, vehicleType).join('')}
+  </div>
+</section>
+
+<!-- ═══ 5. TESTIMONIALS CAROUSEL — Cialdini preuve sociale ═══ -->
+${
+  totalTipCount > 0 || totalTrips >= 20
+    ? `<section class="testimonials-section">
+  <div class="testimonials-header">
+    <div class="section-eyebrow reveal">CE QU'ILS EN DISENT</div>
+    <h2 class="section-title reveal delay-1">${totalTipCount > 3 ? `${totalTipCount} passagers` : 'Des passagers'} satisfait${totalTipCount > 1 ? 's' : ''}</h2>
+  </div>
+  <div class="testimonials-scroll">
+    ${renderTestimonials(site, firstName, city).join('')}
+  </div>
+</section>`
+    : ''
+}
+
+<!-- ═══ 6. FINAL CTA — Nike-style block clôture ═══ -->
+<div class="final-cta reveal">
+  <div class="final-cta-title">Prêt à réserver<br>votre trajet avec ${firstName}&nbsp;?</div>
+  <div class="final-cta-sub">Prix fixe garanti · Paiement sécurisé · Sans surprise</div>
+  <button class="final-cta-btn" onclick="document.getElementById('bookingSection').scrollIntoView({behavior:'smooth',block:'start'})">
+    Réserver maintenant
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" width="14" height="14"><path d="M5 12h14M12 5l7 7-7 7"/></svg>
+  </button>
+</div>
+
+<!-- ═══ 7. FOOTER ═══ -->
 <footer class="foreas-footer">
-  Propulse par <a href="https://foreas.xyz" target="_blank" rel="noopener">FOREAS</a><br>
-  <div class="legal">&copy; ${new Date().getFullYear()} FOREAS Labs &middot; <a href="#" style="color:#333">CGU</a> &middot; <a href="#" style="color:#333">Confidentialite</a> &middot; <a href="#" style="color:#333">Mentions legales</a></div>
+  Propulsé par <a href="https://foreas.xyz" target="_blank" rel="noopener">FOREAS</a><br>
+  <div class="legal">&copy; ${new Date().getFullYear()} FOREAS Labs &middot; <a href="#" style="color:#333">CGU</a> &middot; <a href="#" style="color:#333">Confidentialité</a> &middot; <a href="#" style="color:#333">Mentions légales</a></div>
 </footer>
 
 </div><!-- /wrap -->
@@ -1658,6 +2430,29 @@ function saveBooking(email, phone, paymentIntentId) {
     btn.textContent = CAN_PAY ? 'Payer ' + Math.round(calculatedFare) + '\\u20AC' : 'Confirmer la reservation';
   });
 }
+
+/* ═══════════════════════════════════════════════════════════
+   v104 Sprint 3B — Scroll Reveal (IntersectionObserver)
+   Principe Norman : feedback visuel subtil à chaque scroll.
+   Performance : obs.unobserve() après 1 reveal (one-shot).
+   ═══════════════════════════════════════════════════════════ */
+(function setupScrollReveal() {
+  if (!('IntersectionObserver' in window)) {
+    // Fallback : tout visible d'un coup pour les vieux navigateurs
+    document.querySelectorAll('.reveal').forEach(function(el) { el.classList.add('visible'); });
+    return;
+  }
+  var obs = new IntersectionObserver(function(entries) {
+    entries.forEach(function(entry) {
+      if (entry.isIntersecting) {
+        entry.target.classList.add('visible');
+        obs.unobserve(entry.target);
+      }
+    });
+  }, { root: null, threshold: 0.14, rootMargin: '0px 0px -40px 0px' });
+
+  document.querySelectorAll('.reveal').forEach(function(el) { obs.observe(el); });
+})();
 </script>
 </body>
 </html>`;

@@ -11,20 +11,112 @@
 
 import { Router, Request, Response } from 'express';
 import OpenAI from 'openai';
+import Anthropic from '@anthropic-ai/sdk';
 import fetch from 'node-fetch';
 import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
+import { AJNAYA_BASE_SYSTEM_PROMPT, buildAjnayaSystemPrompt } from '../constants/ajnayaPersonality';
 
 const router = Router();
 
 // Configuration depuis les variables d'environnement
 const CONFIG = {
   OPENAI_API_KEY: process.env.OPENAI_API_KEY || '',
+  ANTHROPIC_API_KEY: process.env.ANTHROPIC_API_KEY || '',
   ELEVENLABS_API_KEY: process.env.ELEVENLABS_API_KEY || '',
-  ELEVENLABS_VOICE_ID: process.env.ELEVENLABS_VOICE_ID || 'Xb7hH8MSUJpSbSDYk0k2', // Voix française
+  ELEVENLABS_VOICE_ID: process.env.ELEVENLABS_VOICE_ID || 'MNKK2Wl2wbbsEPQTHZGt', // Koraly — Credible Pro Parisian (voix officielle Ajnaya, validée A/B test v3.6)
   MISTRAL_API_KEY: process.env.MISTRAL_API_KEY || '',
 };
+
+// Client Anthropic pour ElevenLabs custom LLM
+let anthropic: Anthropic | null = null;
+if (CONFIG.ANTHROPIC_API_KEY) {
+  anthropic = new Anthropic({ apiKey: CONFIG.ANTHROPIC_API_KEY });
+  console.log('✅ [AJNAYA] Anthropic configuré (ElevenLabs LLM)');
+}
+
+// ============================================
+// 🤖 ROUTE 0: ELEVENLABS CUSTOM LLM (OpenAI-compatible)
+// POST /api/ajnaya/llm — appelé par ElevenLabs ConvAI
+// ============================================
+router.post('/llm', async (req: Request, res: Response) => {
+  const startTime = Date.now();
+  try {
+    const { messages = [], model = 'claude-sonnet-4-5', stream = false } = req.body;
+
+    console.log(`🤖 [AJNAYA LLM] Requête ElevenLabs — model=${model} messages=${messages.length}`);
+
+    if (!messages.length) {
+      return res.status(400).json({ error: 'messages requis' });
+    }
+
+    // Séparer system et messages user/assistant
+    const systemMessages = messages.filter((m: any) => m.role === 'system');
+    const conversationMessages = messages.filter((m: any) => m.role !== 'system');
+    const systemPrompt = systemMessages.map((m: any) => m.content).join('\n\n');
+
+    // Choisir le modèle Anthropic
+    const claudeModel = model.includes('opus')
+      ? 'claude-opus-4-5'
+      : model.includes('haiku')
+        ? 'claude-haiku-3-5'
+        : 'claude-sonnet-4-5';
+
+    if (!anthropic) {
+      // Fallback OpenAI si Anthropic non configuré
+      if (openai) {
+        const completion = await openai.chat.completions.create({
+          model: 'gpt-4o-mini',
+          messages: messages,
+          temperature: 0.5,
+          max_tokens: 200,
+        });
+        return res.json(completion);
+      }
+      return res.status(503).json({ error: 'Aucun LLM configuré' });
+    }
+
+    // Appel Anthropic
+    const response = await anthropic.messages.create({
+      model: claudeModel,
+      max_tokens: 300,
+      system: systemPrompt || undefined,
+      messages: conversationMessages.map((m: any) => ({
+        role: m.role as 'user' | 'assistant',
+        content: m.content,
+      })),
+    });
+
+    const content = response.content[0]?.type === 'text' ? response.content[0].text : '';
+    console.log(
+      `✅ [AJNAYA LLM] Réponse (${Date.now() - startTime}ms): "${content.substring(0, 80)}..."`,
+    );
+
+    // Format OpenAI compatible (ce qu'attend ElevenLabs)
+    return res.json({
+      id: `chatcmpl-${Date.now()}`,
+      object: 'chat.completion',
+      created: Math.floor(Date.now() / 1000),
+      model: claudeModel,
+      choices: [
+        {
+          index: 0,
+          message: { role: 'assistant', content },
+          finish_reason: response.stop_reason === 'end_turn' ? 'stop' : response.stop_reason,
+        },
+      ],
+      usage: {
+        prompt_tokens: response.usage.input_tokens,
+        completion_tokens: response.usage.output_tokens,
+        total_tokens: response.usage.input_tokens + response.usage.output_tokens,
+      },
+    });
+  } catch (error: any) {
+    console.error('❌ [AJNAYA LLM] Erreur:', error.message);
+    return res.status(500).json({ error: error.message });
+  }
+});
 
 // Client OpenAI
 let openai: OpenAI | null = null;
@@ -35,18 +127,8 @@ if (CONFIG.OPENAI_API_KEY) {
   console.warn('⚠️ [AJNAYA] OpenAI non configuré');
 }
 
-// Prompt système Ajnaya — Ultra-compact v3.0 (optimisé vitesse)
-const AJNAYA_SYSTEM_PROMPT = `Tu es Ajnaya, copilote IA VTC Paris. Vétérane 15+ ans, 300k courses. Tutoiement. Français uniquement.
-
-RÈGLES: 1-2 phrases max. Direct. Actionnable. €/h ou €/course. 1 emoji max. Pas de blabla.
-
-ZONES/HEURE: 6-8h gares+CDG | 8-10h Défense/Opéra | 11-14h Champs/Marais | 17-20h business | 20-23h Bastille/Pigalle | 23-4h clubs. Ven/Sam nuit x2.
-
-ALGOS: Uber=mouvement+surge, <85% accept=moins de premium, 3 refus=cooldown 5-8min. Bolt=proximité>note. Heetch=nuit jeu-sam. FreeNow=corporate.
-
-PIÈGES: Châtelet HPo=bouchon. Tour Eiffel=500m pas rentable. Orly=file trop longue. Parking souterrain=GPS mort.
-
-TIPS: 200-400m des hotspots. Bouger lent>garé. Multi-app=meilleure strat.`;
+// v66 — ADN Ajnaya injecté depuis la source unique de vérité (constants/ajnayaPersonality.ts)
+// AJNAYA_BASE_SYSTEM_PROMPT importé ci-dessus — plus de prompt inline
 
 // ============================================
 // 🎤 ROUTE 1: TRANSCRIPTION (Whisper)
@@ -134,8 +216,12 @@ router.post('/transcribe', async (req: Request, res: Response) => {
 });
 
 // ============================================
-// 🧠 ROUTE 2: CHAT (GPT-4o)
+// 🧠 ROUTE 2: CHAT (LangGraph Ajnaya + Fallback GPT-4o)
 // ============================================
+
+// LangGraph mode: set USE_LANGGRAPH=true in env to activate
+const USE_LANGGRAPH = process.env.USE_LANGGRAPH === 'true';
+
 router.post('/chat', async (req: Request, res: Response) => {
   const startTime = Date.now();
 
@@ -157,14 +243,104 @@ router.post('/chat', async (req: Request, res: Response) => {
       });
     }
 
-    // Construire les messages
-    const messages: any[] = [{ role: 'system', content: AJNAYA_SYSTEM_PROMPT }];
+    // ============================================
+    // LANGGRAPH MODE — Claude Sonnet via graphe multi-agents
+    // ============================================
+    if (USE_LANGGRAPH) {
+      try {
+        const { getAjnayaGraph } = await import('../lib/langgraph/graph.js');
+        const graph = getAjnayaGraph();
 
-    // Ajouter contexte si fourni
+        const result = await graph.invoke({
+          rawMessage: message.trim(),
+          channel: context?.channel || 'widget_site',
+          prospectId: context?.prospect_id || null,
+          driverId: context?.driverId || context?.driver_id || null,
+          sessionId: context?.session_id || null,
+        });
+
+        console.log(
+          `✅ [AJNAYA] LangGraph response (${Date.now() - startTime}ms) errors=${result.errors?.length || 0}`,
+        );
+
+        // MEME FORMAT DE REPONSE que l'ancien pour ne rien casser
+        return res.json({
+          success: true,
+          content: result.response,
+          response: result.response,
+          text: result.response,
+          provider: 'langgraph-claude',
+          sonar: false,
+          bolt: false,
+          fusion: null,
+          langgraph: {
+            model: result.llmModel,
+            tokens: result.llmTokens,
+            cost_usd: result.llmCostUsd,
+            sentiment: result.sentiment,
+            strategy: result.strategy?.tone,
+            errors: result.errors?.length || 0,
+          },
+          response_time_ms: Date.now() - startTime,
+        });
+      } catch (graphError: any) {
+        console.error('❌ [AJNAYA] LangGraph failed, falling back to GPT-4o:', graphError.message);
+        // Fall through to legacy GPT-4o path
+      }
+    }
+
+    // ============================================
+    // LEGACY MODE — GPT-4o (fallback ou mode par defaut)
+    // ============================================
+
+    // Construire les messages — utiliser le prompt compta si le client l'envoie
+    const isComptaMode = !!(context?.systemPrompt && context.systemPrompt.length > 50);
+    const systemPrompt = isComptaMode
+      ? context.systemPrompt
+      : buildAjnayaSystemPrompt({
+          canal: context?.channel || 'app',
+          zone: context?.zone || null,
+          heat_score: context?.heat_score || null,
+          subscription_status: context?.subscription_status || null,
+          conversation_count: (history || []).length || null,
+          conversation_history:
+            (history || [])
+              .slice(-6)
+              .map((m: any) => `[${m.role}] ${m.content}`)
+              .join('\n') || null,
+          signals_context: null,
+          verifiable_proofs: null,
+        });
+    const messages: any[] = [{ role: 'system', content: systemPrompt }];
+    if (isComptaMode) {
+      console.log('🧾 [AJNAYA] Mode COMPTABILITÉ détecté — prompt compta utilisé');
+    }
+
+    // ── FUSION ENGINE : croisement natif de TOUTES les sources ──
+    let fusionCtx: any = null;
+    let sonarUsed = false;
+    let boltUsed = false;
+    try {
+      const { fuse, serializeFusionContext } = await import('../services/AjnayaFusionEngine.js');
+      fusionCtx = await fuse(message, context?.driverId);
+      const fusionText = serializeFusionContext(fusionCtx);
+      if (fusionText && fusionCtx.sourcesUsed.length > 0) {
+        messages.push({ role: 'system', content: `DONNÉES TERRAIN TEMPS RÉEL:\n${fusionText}` });
+      }
+      sonarUsed = fusionCtx.sourcesUsed.includes('sonar');
+      boltUsed = fusionCtx.sourcesUsed.includes('bolt');
+      console.log(
+        `🧠 [AJNAYA] FusionEngine: ${fusionCtx.sourcesUsed.length}/10 sources en ${fusionCtx.totalLatency}ms`,
+      );
+    } catch (fusionErr: any) {
+      console.warn('[AJNAYA] FusionEngine skip:', fusionErr.message);
+    }
+
+    // Ajouter contexte chauffeur si fourni
     if (context && Object.keys(context).length > 0) {
       messages.push({
         role: 'system',
-        content: `Contexte: ${JSON.stringify(context)}`,
+        content: `Chauffeur: ${JSON.stringify(context)}`,
       });
     }
 
@@ -185,10 +361,10 @@ router.post('/chat', async (req: Request, res: Response) => {
         console.log('🤖 [AJNAYA] Utilisation GPT-4o');
 
         const completion = await openai.chat.completions.create({
-          model: 'gpt-4o-mini',
+          model: 'gpt-4o',
           messages: messages,
-          temperature: 0.4,
-          max_tokens: 80,
+          temperature: 0.3,
+          max_tokens: fusionCtx?.sourcesUsed?.length > 2 ? 250 : sonarUsed || boltUsed ? 200 : 120,
         });
 
         responseText = completion.choices[0].message.content || '';
@@ -246,6 +422,16 @@ router.post('/chat', async (req: Request, res: Response) => {
       response: responseText, // Alias pour compatibilité
       text: responseText, // Alias pour compatibilité
       provider: provider,
+      sonar: sonarUsed,
+      bolt: boltUsed,
+      fusion: fusionCtx
+        ? {
+            sources: fusionCtx.sourcesUsed,
+            zones: fusionCtx.demandZones?.length || 0,
+            alerts: fusionCtx.alerts?.length || 0,
+            latency: fusionCtx.totalLatency,
+          }
+        : null,
       response_time_ms: Date.now() - startTime,
     });
   } catch (error: any) {
@@ -275,7 +461,7 @@ router.post('/synthesize', async (req: Request, res: Response) => {
   try {
     console.log('🔊 [AJNAYA] Synthèse vocale demandée');
 
-    const { text, emotion = 'neutral' } = req.body;
+    const { text, emotion = 'neutral', speed: clientSpeed } = req.body;
 
     if (!text || typeof text !== 'string' || text.trim().length === 0) {
       return res.status(400).json({
@@ -285,11 +471,14 @@ router.post('/synthesize', async (req: Request, res: Response) => {
     }
 
     const cleanText = text.trim().substring(0, 1000); // Limite 1000 chars
+    // Speed: client peut override (1.0-1.5), sinon défaut 1.15
+    const ttsSpeed =
+      typeof clientSpeed === 'number' ? Math.min(Math.max(clientSpeed, 0.7), 1.5) : 1.2;
 
     // Essayer ElevenLabs d'abord
     if (CONFIG.ELEVENLABS_API_KEY) {
       try {
-        console.log('🎙️ [AJNAYA] Utilisation ElevenLabs');
+        console.log('🎙️ [AJNAYA] Utilisation ElevenLabs, speed:', ttsSpeed);
 
         const elevenLabsResponse = await fetch(
           `https://api.elevenlabs.io/v1/text-to-speech/${CONFIG.ELEVENLABS_VOICE_ID}`,
@@ -303,7 +492,7 @@ router.post('/synthesize', async (req: Request, res: Response) => {
             body: JSON.stringify({
               text: cleanText,
               model_id: 'eleven_multilingual_v2',
-              voice_settings: { ...getVoiceSettings(emotion), speed: 1.15 },
+              voice_settings: { ...getVoiceSettings(emotion), speed: ttsSpeed },
             }),
           },
         );
@@ -591,7 +780,7 @@ async function handleChat(
   context?: any,
 ): Promise<{ content: string; provider: string }> {
   const messages: any[] = [
-    { role: 'system', content: AJNAYA_SYSTEM_PROMPT },
+    { role: 'system', content: AJNAYA_BASE_SYSTEM_PROMPT },
     { role: 'user', content: message },
   ];
 
@@ -631,7 +820,7 @@ async function handleSynthesis(text: string): Promise<{ audio: string | null; pr
           body: JSON.stringify({
             text: text.substring(0, 1000),
             model_id: 'eleven_multilingual_v2',
-            voice_settings: { stability: 0.5, similarity_boost: 0.75, style: 0.5, speed: 1.15 },
+            voice_settings: { stability: 0.5, similarity_boost: 0.75, style: 0.5, speed: 1.0 },
           }),
         },
       );

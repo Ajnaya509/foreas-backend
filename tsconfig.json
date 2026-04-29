@@ -21,7 +21,8 @@
     "src/middleware/validation.middleware.ts",
     "src/data/**/*",
     "src/ai/**/*",
-    "src/jobs/**/*"
+    "src/jobs/**/*",
+    "src/lib/langgraph/**/*"
   ],
   "exclude": ["src/__tests__", "src/tests"]
 }

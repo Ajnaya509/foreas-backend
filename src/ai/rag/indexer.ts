@@ -30,7 +30,7 @@ const EMBEDDING_DIMENSION = 1536;
 function chunkText(
   text: string,
   maxCharsPerChunk = CHUNK_SIZE * 3,
-  overlapChars = CHUNK_OVERLAP * 3
+  overlapChars = CHUNK_OVERLAP * 3,
 ): string[] {
   const chunks: string[] = [];
   let start = 0;
@@ -109,11 +109,7 @@ export async function indexDocument(input: IndexDocumentInput): Promise<Document
 
   if (existing) {
     console.log(`[RAG Indexer] Document already indexed: ${input.title}`);
-    const { data } = await supabase
-      .from('documents')
-      .select()
-      .eq('id', existing.id)
-      .single();
+    const { data } = await supabase.from('documents').select().eq('id', existing.id).single();
     return data as Document;
   }
 
@@ -199,14 +195,13 @@ async function chunkAndEmbed(doc: Document): Promise<void> {
       embeddings = batch.map(() => []);
     }
 
-    // Insert chunks
-    const chunkRecords = batch.map((content, j) => ({
+    // Insert chunks — column names must match Supabase schema
+    const chunkRecords = batch.map((text, j) => ({
       document_id: doc.id,
       chunk_index: i + j,
-      content,
-      embedding: embeddings[j]?.length === EMBEDDING_DIMENSION ? embeddings[j] : null,
-      token_count: estimateTokens(content),
-      metadata: {},
+      chunk_text: text,
+      embedding:
+        embeddings[j]?.length === EMBEDDING_DIMENSION ? `[${embeddings[j].join(',')}]` : null,
     }));
 
     const { error } = await supabase.from('document_chunks').insert(chunkRecords);
@@ -242,9 +237,7 @@ export async function getDocument(documentId: string): Promise<Document | null> 
 /**
  * List active documents
  */
-export async function listDocuments(
-  sourceType?: DocumentSourceType
-): Promise<Document[]> {
+export async function listDocuments(sourceType?: DocumentSourceType): Promise<Document[]> {
   const supabase = getSupabaseAdmin();
 
   let query = supabase
@@ -312,9 +305,7 @@ export async function reembedDocument(documentId: string): Promise<void> {
 /**
  * Index multiple documents
  */
-export async function bulkIndexDocuments(
-  documents: IndexDocumentInput[]
-): Promise<Document[]> {
+export async function bulkIndexDocuments(documents: IndexDocumentInput[]): Promise<Document[]> {
   const results: Document[] = [];
 
   for (const doc of documents) {
@@ -333,7 +324,7 @@ export async function bulkIndexDocuments(
  * Index FAQ documents from JSON
  */
 export async function indexFAQs(
-  faqs: Array<{ question: string; answer: string; category?: string }>
+  faqs: Array<{ question: string; answer: string; category?: string }>,
 ): Promise<number> {
   let indexed = 0;
 

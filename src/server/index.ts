@@ -14,6 +14,7 @@ import { authRateLimit, stripeRateLimit } from '@/middleware/rateLimiter';
 import { createContext } from './context';
 import { appRouter } from './routers';
 import { aiProxyRouter } from './api/ai-proxy';
+import communityRoutes from '../routes/community.routes';
 
 // Initialiser Sentry si configuré
 if (env.SENTRY_DSN) {
@@ -50,6 +51,11 @@ app.use(express.json());
  * App Mobile → /api/ai/* → AI Backend /api/ajnaya/*
  */
 app.use('/api/ai', aiProxyRouter);
+
+/**
+ * Community routes — Moderation IA + Alertes trending
+ */
+app.use('/api/community', communityRoutes);
 
 /**
  * Health check endpoint

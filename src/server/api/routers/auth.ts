@@ -1,13 +1,10 @@
-import { z } from "zod";
-import bcrypt from "bcryptjs";
-import jwt from "jsonwebtoken";
-import { TRPCError } from "@trpc/server";
-import {
-  createTRPCRouter,
-  publicProcedure,
-  protectedProcedure,
-} from "@/server/api/trpc";
-import { env } from "@/env";
+import { z } from 'zod';
+import bcrypt from 'bcryptjs';
+import jwt from 'jsonwebtoken';
+import { TRPCError } from '@trpc/server';
+import { createTRPCRouter, publicProcedure, protectedProcedure } from '@/server/api/trpc';
+import { env } from '@/env';
+import { linkProspectOnRegistration } from '@/helpers/prospectBridge';
 
 export const authRouter = createTRPCRouter({
   // Inscription chauffeur
@@ -19,38 +16,38 @@ export const authRouter = createTRPCRouter({
         name: z.string().min(2),
         phone: z.string().optional(),
         licenseNumber: z.string().min(5),
-      })
+      }),
     )
     .mutation(async ({ ctx, input }) => {
       const { email, password, name, phone, licenseNumber } = input;
-      
+
       // Vérifier si l'utilisateur existe déjà
       const existingUser = await ctx.prisma.user.findUnique({
         where: { email },
       });
-      
+
       if (existingUser) {
         throw new TRPCError({
-          code: "CONFLICT",
-          message: "Un compte existe déjà avec cet email",
+          code: 'CONFLICT',
+          message: 'Un compte existe déjà avec cet email',
         });
       }
-      
+
       // Vérifier si le numéro de licence existe déjà
       const existingLicense = await ctx.prisma.driver.findUnique({
         where: { licenseNumber },
       });
-      
+
       if (existingLicense) {
         throw new TRPCError({
-          code: "CONFLICT",
-          message: "Ce numéro de licence est déjà enregistré",
+          code: 'CONFLICT',
+          message: 'Ce numéro de licence est déjà enregistré',
         });
       }
-      
+
       // Hasher le mot de passe
       const hashedPassword = await bcrypt.hash(password, 12);
-      
+
       // Créer l'utilisateur et le profil chauffeur
       const user = await ctx.prisma.user.create({
         data: {
@@ -58,7 +55,7 @@ export const authRouter = createTRPCRouter({
           password: hashedPassword,
           name,
           phone,
-          role: "DRIVER",
+          role: 'DRIVER',
           driver: {
             create: {
               licenseNumber,
@@ -69,18 +66,24 @@ export const authRouter = createTRPCRouter({
           driver: true,
         },
       });
-      
+
+      // ── Pont prospect ↔ driver (non-bloquant) ──────────────
+      // Cherche si ce numéro a une histoire Pieuvre (WhatsApp, site, appels...)
+      // et crée le lien bidirectionnel dans foreas_identity_bridge.
+      // void = fire-and-forget, ne bloque JAMAIS l'inscription.
+      if (user.driver) {
+        void linkProspectOnRegistration(phone ?? null, user.driver.id, user.id);
+      }
+
       // Générer un token JWT
-      const token = jwt.sign(
-        { userId: user.id, email: user.email },
-        env.NEXTAUTH_SECRET,
-        { expiresIn: "7d" }
-      );
-      
+      const token = jwt.sign({ userId: user.id, email: user.email }, env.NEXTAUTH_SECRET, {
+        expiresIn: '7d',
+      });
+
       // Créer une session
       const expiresAt = new Date();
       expiresAt.setDate(expiresAt.getDate() + 7);
-      
+
       await ctx.prisma.session.create({
         data: {
           userId: user.id,
@@ -88,7 +91,7 @@ export const authRouter = createTRPCRouter({
           expiresAt,
         },
       });
-      
+
       return {
         user: {
           id: user.id,
@@ -100,18 +103,18 @@ export const authRouter = createTRPCRouter({
         token,
       };
     }),
-  
+
   // Connexion
   signIn: publicProcedure
     .input(
       z.object({
         email: z.string().email(),
         password: z.string(),
-      })
+      }),
     )
     .mutation(async ({ ctx, input }) => {
       const { email, password } = input;
-      
+
       // Récupérer l'utilisateur
       const user = await ctx.prisma.user.findUnique({
         where: { email },
@@ -119,41 +122,39 @@ export const authRouter = createTRPCRouter({
           driver: true,
         },
       });
-      
+
       if (!user || !user.password) {
         throw new TRPCError({
-          code: "UNAUTHORIZED",
-          message: "Email ou mot de passe incorrect",
+          code: 'UNAUTHORIZED',
+          message: 'Email ou mot de passe incorrect',
         });
       }
-      
+
       // Vérifier le mot de passe
       const isValidPassword = await bcrypt.compare(password, user.password);
-      
+
       if (!isValidPassword) {
         throw new TRPCError({
-          code: "UNAUTHORIZED",
-          message: "Email ou mot de passe incorrect",
+          code: 'UNAUTHORIZED',
+          message: 'Email ou mot de passe incorrect',
         });
       }
-      
+
       // Mettre à jour lastLoginAt
       await ctx.prisma.user.update({
         where: { id: user.id },
         data: { lastLoginAt: new Date() },
       });
-      
+
       // Générer un token JWT
-      const token = jwt.sign(
-        { userId: user.id, email: user.email },
-        env.NEXTAUTH_SECRET,
-        { expiresIn: "7d" }
-      );
-      
+      const token = jwt.sign({ userId: user.id, email: user.email }, env.NEXTAUTH_SECRET, {
+        expiresIn: '7d',
+      });
+
       // Créer une session
       const expiresAt = new Date();
       expiresAt.setDate(expiresAt.getDate() + 7);
-      
+
       await ctx.prisma.session.create({
         data: {
           userId: user.id,
@@ -161,7 +162,7 @@ export const authRouter = createTRPCRouter({
           expiresAt,
         },
       });
-      
+
       return {
         user: {
           id: user.id,
@@ -173,7 +174,7 @@ export const authRouter = createTRPCRouter({
         token,
       };
     }),
-  
+
   // Récupérer le profil utilisateur
   getProfile: protectedProcedure.query(async ({ ctx }) => {
     const user = await ctx.prisma.user.findUnique({
@@ -193,17 +194,17 @@ export const authRouter = createTRPCRouter({
         },
       },
     });
-    
+
     if (!user) {
       throw new TRPCError({
-        code: "NOT_FOUND",
-        message: "Utilisateur non trouvé",
+        code: 'NOT_FOUND',
+        message: 'Utilisateur non trouvé',
       });
     }
-    
+
     return user;
   }),
-  
+
   // Mettre à jour le profil
   updateProfile: protectedProcedure
     .input(
@@ -214,11 +215,11 @@ export const authRouter = createTRPCRouter({
         companyName: z.string().optional(),
         siret: z.string().optional(),
         vatNumber: z.string().optional(),
-      })
+      }),
     )
     .mutation(async ({ ctx, input }) => {
       const { companyName, siret, vatNumber, ...userFields } = input;
-      
+
       // Mettre à jour l'utilisateur
       const user = await ctx.prisma.user.update({
         where: { id: ctx.session.user.id },
@@ -227,7 +228,7 @@ export const authRouter = createTRPCRouter({
           driver: true,
         },
       });
-      
+
       // Si c'est un chauffeur, mettre à jour ses infos business
       if (user.driver && (companyName || siret || vatNumber)) {
         await ctx.prisma.driver.update({
@@ -239,20 +240,20 @@ export const authRouter = createTRPCRouter({
           },
         });
       }
-      
+
       return user;
     }),
-  
+
   // Déconnexion
   signOut: protectedProcedure.mutation(async ({ ctx }) => {
     // Supprimer toutes les sessions de l'utilisateur
     await ctx.prisma.session.deleteMany({
       where: { userId: ctx.session.user.id },
     });
-    
+
     return { success: true };
   }),
-  
+
   // Vérifier un token
   verifyToken: publicProcedure
     .input(z.object({ token: z.string() }))
@@ -263,7 +264,7 @@ export const authRouter = createTRPCRouter({
           userId: string;
           email: string;
         };
-        
+
         // Vérifier que la session existe
         const session = await ctx.prisma.session.findUnique({
           where: { token: input.token },
@@ -275,22 +276,22 @@ export const authRouter = createTRPCRouter({
             },
           },
         });
-        
+
         if (!session || session.expiresAt < new Date()) {
           throw new TRPCError({
-            code: "UNAUTHORIZED",
-            message: "Session expirée",
+            code: 'UNAUTHORIZED',
+            message: 'Session expirée',
           });
         }
-        
+
         return {
           valid: true,
           user: session.user,
         };
       } catch (error) {
         throw new TRPCError({
-          code: "UNAUTHORIZED",
-          message: "Token invalide",
+          code: 'UNAUTHORIZED',
+          message: 'Token invalide',
         });
       }
     }),

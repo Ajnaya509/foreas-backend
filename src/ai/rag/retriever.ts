@@ -33,7 +33,7 @@ export interface SearchOptions {
  */
 export async function searchDocuments(
   query: string,
-  options: SearchOptions = {}
+  options: SearchOptions = {},
 ): Promise<SearchResult[]> {
   const supabase = getSupabaseAdmin();
   const openai = getOpenAIClient();
@@ -73,7 +73,13 @@ export async function searchDocuments(
     return textSearch(query, maxResults);
   }
 
-  let results = (data || []) as SearchResult[];
+  let results = (data || []).map((row: any) => ({
+    chunk_id: row.id,
+    document_id: row.document_id,
+    document_title: '',
+    content: row.chunk_text || row.content || '',
+    similarity: row.similarity || 0,
+  })) as SearchResult[];
 
   // Filter by source types if specified
   if (options.sourceTypes?.length) {
@@ -82,7 +88,7 @@ export async function searchDocuments(
   }
 
   console.log(
-    `[RAG Retriever] Found ${results.length} results for query: "${query.substring(0, 50)}..."`
+    `[RAG Retriever] Found ${results.length} results for query: "${query.substring(0, 50)}..."`,
   );
 
   return results;
@@ -101,12 +107,12 @@ async function textSearch(query: string, maxResults: number): Promise<SearchResu
       `
       id,
       document_id,
-      content,
+      chunk_text,
       documents!inner(title, is_active)
-    `
+    `,
     )
     .eq('documents.is_active', true)
-    .ilike('content', `%${query}%`)
+    .ilike('chunk_text', `%${query}%`)
     .limit(maxResults);
 
   if (error) {
@@ -118,7 +124,7 @@ async function textSearch(query: string, maxResults: number): Promise<SearchResu
     chunk_id: row.id,
     document_id: row.document_id,
     document_title: row.documents?.title || 'Unknown',
-    content: row.content,
+    content: row.chunk_text,
     similarity: 0.5, // Arbitrary score for text match
   }));
 }
@@ -126,9 +132,7 @@ async function textSearch(query: string, maxResults: number): Promise<SearchResu
 /**
  * Get document IDs by source type
  */
-async function getDocumentsBySourceType(
-  sourceTypes: DocumentSourceType[]
-): Promise<Set<string>> {
+async function getDocumentsBySourceType(sourceTypes: DocumentSourceType[]): Promise<Set<string>> {
   const supabase = getSupabaseAdmin();
 
   const { data } = await supabase
@@ -165,7 +169,7 @@ export function buildContext(results: SearchResult[]): string {
 export function buildRAGPrompt(
   query: string,
   results: SearchResult[],
-  systemPrompt?: string
+  systemPrompt?: string,
 ): string {
   const context = buildContext(results);
 
@@ -202,10 +206,7 @@ Cite les sources si tu utilises des informations du contexte.`;
 /**
  * Search FAQs only
  */
-export async function searchFAQs(
-  query: string,
-  maxResults = 3
-): Promise<SearchResult[]> {
+export async function searchFAQs(query: string, maxResults = 3): Promise<SearchResult[]> {
   return searchDocuments(query, {
     maxResults,
     sourceTypes: ['faq'],
@@ -216,10 +217,7 @@ export async function searchFAQs(
 /**
  * Search support scripts
  */
-export async function searchSupportScripts(
-  query: string,
-  maxResults = 3
-): Promise<SearchResult[]> {
+export async function searchSupportScripts(query: string, maxResults = 3): Promise<SearchResult[]> {
   return searchDocuments(query, {
     maxResults,
     sourceTypes: ['support_script'],
@@ -232,7 +230,7 @@ export async function searchSupportScripts(
  */
 export async function searchGuidesAndPolicies(
   query: string,
-  maxResults = 3
+  maxResults = 3,
 ): Promise<SearchResult[]> {
   return searchDocuments(query, {
     maxResults,
@@ -250,7 +248,7 @@ export async function searchGuidesAndPolicies(
  */
 export async function hybridSearch(
   query: string,
-  options: SearchOptions = {}
+  options: SearchOptions = {},
 ): Promise<SearchResult[]> {
   const maxResults = options.maxResults || DEFAULT_MAX_RESULTS;
 
@@ -282,9 +280,7 @@ export async function hybridSearch(
   }
 
   // Sort by similarity and limit
-  return merged
-    .sort((a, b) => b.similarity - a.similarity)
-    .slice(0, maxResults);
+  return merged.sort((a, b) => b.similarity - a.similarity).slice(0, maxResults);
 }
 
 // ============================================
@@ -303,9 +299,9 @@ export async function getChunkById(chunkId: string): Promise<SearchResult | null
       `
       id,
       document_id,
-      content,
+      chunk_text,
       documents!inner(title)
-    `
+    `,
     )
     .eq('id', chunkId)
     .single();
@@ -318,7 +314,7 @@ export async function getChunkById(chunkId: string): Promise<SearchResult | null
     chunk_id: data.id,
     document_id: data.document_id,
     document_title: (data as any).documents?.title || 'Unknown',
-    content: data.content,
+    content: data.chunk_text,
     similarity: 1.0,
   };
 }
@@ -335,9 +331,9 @@ export async function getChunksByIds(chunkIds: string[]): Promise<SearchResult[]
       `
       id,
       document_id,
-      content,
+      chunk_text,
       documents!inner(title)
-    `
+    `,
     )
     .in('id', chunkIds);
 
@@ -349,7 +345,7 @@ export async function getChunksByIds(chunkIds: string[]): Promise<SearchResult[]
     chunk_id: row.id,
     document_id: row.document_id,
     document_title: row.documents?.title || 'Unknown',
-    content: row.content,
+    content: row.chunk_text,
     similarity: 1.0,
   }));
 }

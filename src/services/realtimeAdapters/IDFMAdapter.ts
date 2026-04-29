@@ -58,14 +58,16 @@ export async function getTransportContext(): Promise<string> {
     return transportCache.data;
   }
 
-  const apiKey = process.env.IDFM_API_KEY;
+  const apiKey = process.env.IDFM_API_KEY || process.env.CLÉ_API_IDFM || process.env.CLE_API_IDFM;
   if (!apiKey) {
-    console.warn('[IDFMAdapter] Pas de clé IDFM_API_KEY');
+    console.warn('[IDFMAdapter] Pas de clé IDFM_API_KEY / CLÉ_API_IDFM');
     return '';
   }
 
   try {
-    const url = 'https://prim.iledefrance-mobilites.fr/marketplace/general-message';
+    // Navitia v2 line_reports — plus fiable que general-message (deprecated)
+    const url =
+      'https://prim.iledefrance-mobilites.fr/marketplace/v2/navitia/line_reports?disable_geojson=true&count=50';
 
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 5000);
@@ -84,8 +86,8 @@ export async function getTransportContext(): Promise<string> {
       return '';
     }
 
-    const data: SiriResponse = await res.json();
-    const context = formatTransportContext(data);
+    const navitiaData = await res.json();
+    const context = formatNavitiaContext(navitiaData);
 
     // Cache
     transportCache = { data: context, expires: Date.now() + CACHE_TTL };
@@ -99,6 +101,31 @@ export async function getTransportContext(): Promise<string> {
   }
 }
 
+/**
+ * Parse Navitia v2 line_reports response
+ */
+function formatNavitiaContext(data: any): string {
+  const disruptions = data?.disruptions || [];
+  if (disruptions.length === 0) {
+    return 'TRANSPORT : Aucune perturbation majeure métro/RER. Trafic normal.';
+  }
+
+  const relevant: string[] = [];
+  for (const d of disruptions.slice(0, 5)) {
+    const severity = d.severity?.name || 'info';
+    const msg = d.messages?.[0]?.text || '';
+    const shortMsg = msg.length > 60 ? msg.substring(0, 57) + '...' : msg;
+    if (shortMsg) relevant.push(`[${severity}] ${shortMsg}`);
+  }
+
+  if (relevant.length === 0) {
+    return 'TRANSPORT : Aucune perturbation majeure métro/RER. Trafic normal.';
+  }
+
+  return `TRANSPORT : ${relevant.length} perturbation(s) : ${relevant.slice(0, 3).join(' | ')}. Afflux VTC prévu.`;
+}
+
+/** @deprecated — ancienne API general-message */
 function formatTransportContext(data: SiriResponse): string {
   const disruptions: Disruption[] = [];
 
