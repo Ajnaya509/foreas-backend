@@ -685,6 +685,173 @@ app.get('/api/context/events', async (req: any, res: any) => {
 });
 
 // ============================================================
+// v1.10.46 — Cerveau Collectif Ajnaya
+// Endpoints consommés par SmartZoneIntelligenceService + ThompsonBanditService
+// ============================================================
+
+/**
+ * GET /api/context/transport-disruptions?lat=&lng=&radius=
+ * Perturbations SNCF/RATP/aéroports = pic VTC immédiat dans la zone.
+ * Pour l'instant : reuse AjnayaFusionEngine si présent (SNCF, IDFM déjà câblés)
+ * sinon retourne tableau vide. Toujours JSON valide.
+ */
+app.get('/api/context/transport-disruptions', async (req: any, res: any) => {
+  const { lat, lng, radius } = req.query as { lat?: string; lng?: string; radius?: string };
+  if (!lat || !lng) return res.status(400).json({ error: 'lat, lng required' });
+
+  try {
+    // Tentative : passer par AjnayaFusionEngine si disponible (a déjà SNCF/IDFM)
+    const fusionMod = await import('./services/AjnayaFusionEngine.js').catch(() => null as any);
+    if (fusionMod?.fuse) {
+      const result = await fusionMod
+        .fuse({
+          userLat: parseFloat(lat),
+          userLng: parseFloat(lng),
+          radiusKm: radius ? parseFloat(radius) : 10,
+        })
+        .catch(() => null);
+      const disruptions = result?.disruptions ?? result?.transportDisruptions ?? [];
+      return res.json({ disruptions });
+    }
+    return res.json({ disruptions: [] });
+  } catch (err: any) {
+    console.warn('[Context] transport-disruptions error:', err?.message);
+    res.json({ disruptions: [] });
+  }
+});
+
+/**
+ * GET /api/context/traffic-incidents?lat=&lng=&radius=
+ * Bouchons / accidents / fermetures voie. Source : TomTom/Waze déjà câblés.
+ */
+app.get('/api/context/traffic-incidents', async (req: any, res: any) => {
+  const { lat, lng, radius } = req.query as { lat?: string; lng?: string; radius?: string };
+  if (!lat || !lng) return res.status(400).json({ error: 'lat, lng required' });
+
+  try {
+    const fusionMod = await import('./services/AjnayaFusionEngine.js').catch(() => null as any);
+    if (fusionMod?.fuse) {
+      const result = await fusionMod
+        .fuse({
+          userLat: parseFloat(lat),
+          userLng: parseFloat(lng),
+          radiusKm: radius ? parseFloat(radius) : 10,
+        })
+        .catch(() => null);
+      const incidents = result?.trafficIncidents ?? result?.incidents ?? [];
+      return res.json({ incidents });
+    }
+    return res.json({ incidents: [] });
+  } catch (err: any) {
+    console.warn('[Context] traffic-incidents error:', err?.message);
+    res.json({ incidents: [] });
+  }
+});
+
+/**
+ * GET /api/bandit/aggregated-arms
+ * Bootstrap des bandit arms agrégés depuis bandit_arms_aggregated.
+ * Lecture publique (pas de PII, juste zone × heure × jour × alpha/beta).
+ * Consommé par ThompsonBanditService.bootstrapFromCollective() au login.
+ */
+app.get('/api/bandit/aggregated-arms', async (_req: any, res: any) => {
+  try {
+    const supa = await getSupabaseAdmin();
+    const { data, error } = await supa
+      .from('bandit_arms_aggregated')
+      .select(
+        'zone_name, hour, day, alpha, beta, total_reward, total_pulls, contributing_drivers, last_aggregated_at',
+      )
+      .gte('total_pulls', 5) // n'exposer que les arms avec au moins 5 pulls (stat fiable)
+      .limit(2000);
+    if (error) throw error;
+    const arms = (data ?? []).map((r: any) => ({
+      zoneName: r.zone_name,
+      hour: r.hour,
+      day: r.day,
+      alpha: Number(r.alpha),
+      beta: Number(r.beta),
+      totalReward: Number(r.total_reward ?? 0),
+      totalPulls: Number(r.total_pulls ?? 0),
+      lastUpdatedMs: new Date(r.last_aggregated_at).getTime(),
+    }));
+    res.json({ arms, aggregatedFrom: arms.length });
+  } catch (err: any) {
+    console.warn('[Bandit] aggregated-arms error:', err?.message);
+    res.json({ arms: [], aggregatedFrom: 0 });
+  }
+});
+
+/**
+ * POST /api/bandit/sync-personal-arms
+ * Body: { driverId: uuid, arms: [{zoneName, hour, day, alpha, beta, totalReward, totalPulls}] }
+ *
+ * Le chauffeur opt-in (share_learning_data = TRUE) push ses arms perso pour
+ * qu'un job CRON pieuvre les agrège (somme alpha/beta) dans bandit_arms_aggregated.
+ *
+ * Stockage temporaire : table `bandit_personal_pushes` (créée à la demande)
+ * pour permettre l'agrégation périodique sans contention.
+ */
+app.post('/api/bandit/sync-personal-arms', async (req: any, res: any) => {
+  const { driverId, arms } = req.body ?? {};
+  if (!driverId || !Array.isArray(arms)) {
+    return res.status(400).json({ error: 'driverId + arms[] required' });
+  }
+  try {
+    const supa = await getSupabaseAdmin();
+    // Vérifier opt-in du chauffeur
+    const { data: prefs } = await supa
+      .from('user_preferences')
+      .select('share_learning_data')
+      .eq('user_id', driverId)
+      .maybeSingle();
+    if (!prefs?.share_learning_data) {
+      return res.json({ accepted: 0, reason: 'opt_out_or_unknown' });
+    }
+    // UPSERT direct sur bandit_arms_aggregated (somme cumulative simple V1)
+    // V2 : utiliser une staging table + job d'agrégation côté pieuvre
+    let accepted = 0;
+    for (const arm of arms.slice(0, 500)) {
+      if (!arm?.zoneName || typeof arm?.hour !== 'number' || typeof arm?.day !== 'number') continue;
+      try {
+        await supa
+          .rpc('bandit_arm_increment', {
+            p_zone: String(arm.zoneName).toLowerCase().trim(),
+            p_hour: arm.hour,
+            p_day: arm.day,
+            p_alpha_delta: Number(arm.alpha ?? 1) - 1,
+            p_beta_delta: Number(arm.beta ?? 1) - 1,
+            p_reward_delta: Number(arm.totalReward ?? 0),
+            p_pulls_delta: Number(arm.totalPulls ?? 0),
+          })
+          .catch(async () => {
+            // Fallback si RPC pas créé : upsert direct (race possible mais OK V1)
+            await supa.from('bandit_arms_aggregated').upsert(
+              {
+                zone_name: String(arm.zoneName).toLowerCase().trim(),
+                hour: arm.hour,
+                day: arm.day,
+                alpha: Number(arm.alpha ?? 1),
+                beta: Number(arm.beta ?? 1),
+                total_reward: Number(arm.totalReward ?? 0),
+                total_pulls: Number(arm.totalPulls ?? 0),
+                contributing_drivers: 1,
+                last_aggregated_at: new Date().toISOString(),
+              },
+              { onConflict: 'zone_name,hour,day' },
+            );
+          });
+        accepted++;
+      } catch {}
+    }
+    res.json({ accepted, total: arms.length });
+  } catch (err: any) {
+    console.warn('[Bandit] sync-personal-arms error:', err?.message);
+    res.status(500).json({ error: err?.message ?? 'sync failed' });
+  }
+});
+
+// ============================================================
 // DRIVER SITE — Site personnel chauffeur haute conversion
 // FOREAS prend 15% platform fee sur chaque pourboire
 // ============================================================
