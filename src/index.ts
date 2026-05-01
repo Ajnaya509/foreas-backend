@@ -2718,7 +2718,10 @@ app.post('/api/driver-site/tip', async (req: any, res: any) => {
     }
     const stripe = await getStripe();
     const amountCents = Math.round(amount * 100);
-    const platformFeeCents = Math.round(amountCents * 0.15); // 15% FOREAS
+    // v1.10.50 — Commission par chauffeur configurable via driver_sites.commission_percent.
+    // Default 0% → tout va au chauffeur. Modifiable plus tard pour MLM/Premium tier.
+    const commissionPercent = Number(site.commission_percent ?? 0);
+    const platformFeeCents = Math.round(amountCents * (commissionPercent / 100));
     const backendUrl =
       process.env.BACKEND_URL || 'https://foreas-stripe-backend-production.up.railway.app';
     // Stripe Checkout pour le pourboire
@@ -2739,9 +2742,15 @@ app.post('/api/driver-site/tip', async (req: any, res: any) => {
         },
       ],
       payment_intent_data: {
-        application_fee_amount: platformFeeCents, // 15% FOREAS
+        // application_fee_amount=0 si commission_percent=0 (Stripe accepte 0)
+        application_fee_amount: platformFeeCents,
         transfer_data: { destination: site.stripe_account_id },
-        metadata: { driver_site_id: site.id, slug, source: source || 'web' },
+        metadata: {
+          driver_site_id: site.id,
+          slug,
+          source: source || 'web',
+          commission_percent: String(commissionPercent),
+        },
       },
       customer_email: email || undefined,
       success_url: `${backendUrl}/c/${slug}?tip=success`,
@@ -2864,7 +2873,7 @@ app.post('/api/driver-site/create-payment-intent', async (req: any, res: any) =>
     const supa = await getSupabaseAdmin();
     const { data: site } = await supa
       .from('driver_sites')
-      .select('id,display_name,stripe_account_id,stripe_charges_enabled')
+      .select('id,display_name,stripe_account_id,stripe_charges_enabled,commission_percent')
       .eq('slug', slug)
       .eq('is_active', true)
       .single();
@@ -2877,7 +2886,9 @@ app.post('/api/driver-site/create-payment-intent', async (req: any, res: any) =>
 
     const stripe = await getStripe();
     const amountCents = Math.round(amount * 100);
-    const platformFeeCents = Math.round(amountCents * 0.12); // 12% FOREAS commission
+    // v1.10.50 — Commission par chauffeur via driver_sites.commission_percent (default 0%).
+    const commissionPercent = Number(site.commission_percent ?? 0);
+    const platformFeeCents = Math.round(amountCents * (commissionPercent / 100));
 
     const paymentIntent = await stripe.paymentIntents.create({
       amount: amountCents,
@@ -2892,6 +2903,7 @@ app.post('/api/driver-site/create-payment-intent', async (req: any, res: any) =>
         dest: destination || '',
         date: booking_date || '',
         time: booking_time || '',
+        commission_percent: String(commissionPercent),
       },
       description: `Course ${site.display_name} — ${pickup_address || 'départ'} → ${destination || 'arrivée'}`,
     });
