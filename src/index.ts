@@ -73,6 +73,116 @@ app.get('/', (_req, res) => {
   res.send(`FOREAS Backend v${VERSION} (${GIT_SHA.substring(0, 7)})`);
 });
 
+// ── CANARY ROUTE (debug Railway cache) ─────────────────────────────────
+// Si celle-ci retourne 404 alors que root montre ce commit,
+// Railway sert un vieux binaire malgré le SHA affiché.
+app.get('/canary-abc123xyz', (_req, res) => {
+  res.json({
+    canary: 'abc123xyz',
+    commit: GIT_SHA,
+    ts: new Date().toISOString(),
+    message: 'If you see this, Railway is running fresh code.',
+  });
+});
+
+// ── ZONES LIVE : TOP-LEVEL MOUNT (zéro indirection Railway) ──
+// Mount DIRECT à côté des autres routes statiques. Si ceci échoue, tout échoue.
+let __zoneCache: any = null;
+const __ZONE_CACHE_TTL = 30_000;
+app.get('/api/zones/health', (_req, res) => {
+  res.json({
+    ok: true,
+    mountMode: 'TOP_LEVEL',
+    cacheAgeMs: __zoneCache ? Date.now() - __zoneCache.refreshedAt : null,
+    lastSourcesUsed: __zoneCache?.sources || [],
+    lastDataQuality: __zoneCache?.dataQuality || 'unknown',
+  });
+});
+app.get('/api/zones/live', async (req, res) => {
+  const now = Date.now();
+  const bypassCache = req.query.nocache === '1';
+  if (!bypassCache && __zoneCache && now - __zoneCache.refreshedAt < __ZONE_CACHE_TTL) {
+    return res.json({
+      zones: __zoneCache.zones,
+      sourcesUsed: __zoneCache.sources,
+      dataQuality: 'cached',
+      refreshedAt: new Date(__zoneCache.refreshedAt).toISOString(),
+      cacheAgeMs: now - __zoneCache.refreshedAt,
+      alerts: __zoneCache.alerts || [],
+      opportunities: __zoneCache.opportunities || [],
+    });
+  }
+  try {
+    const { fuse } = await import('./services/AjnayaFusionEngine.js');
+    const ctx = await fuse('', (req.query.driverId as string) || undefined);
+    const stl = (s: number) => (s >= 80 ? 'SURGE' : s >= 60 ? 'HIGH' : s >= 35 ? 'MEDIUM' : 'LOW');
+    const stm = (s: number) =>
+      s >= 85 ? 2.0 : s >= 70 ? 1.5 : s >= 55 ? 1.25 : s >= 40 ? 1.1 : 1.0;
+    const ste = (s: number) =>
+      s >= 85
+        ? '€45-60/h'
+        : s >= 70
+          ? '€35-50/h'
+          : s >= 55
+            ? '€28-40/h'
+            : s >= 40
+              ? '€22-32/h'
+              : '€18-25/h';
+    const zones = ctx.demandZones.map((z: any) => ({
+      name: z.zone,
+      score: z.score,
+      level: stl(z.score),
+      surgeMultiplier: stm(z.score),
+      estimatedEarnings: ste(z.score),
+      reasons: z.reasons.slice(0, 3),
+      sources: z.sources,
+    }));
+    const dataQuality = ctx.sourcesUsed.some((s: string) =>
+      ['openweather', 'predicthq', 'sncf', 'tomtom', 'idfm', 'bolt'].includes(s),
+    )
+      ? 'live'
+      : 'simulated';
+    __zoneCache = {
+      zones,
+      sources: ctx.sourcesUsed,
+      dataQuality,
+      refreshedAt: now,
+      alerts: ctx.alerts,
+      opportunities: ctx.opportunities,
+    };
+    res.json({
+      zones,
+      sourcesUsed: ctx.sourcesUsed,
+      dataQuality,
+      refreshedAt: new Date(now).toISOString(),
+      cacheAgeMs: 0,
+      latencyMs: ctx.totalLatency,
+      alerts: ctx.alerts,
+      opportunities: ctx.opportunities,
+    });
+  } catch (err: any) {
+    console.error('[zones.live] fuse() failed:', err?.message || err);
+    if (__zoneCache) {
+      return res.json({
+        zones: __zoneCache.zones,
+        sourcesUsed: __zoneCache.sources,
+        dataQuality: 'cached',
+        refreshedAt: new Date(__zoneCache.refreshedAt).toISOString(),
+        cacheAgeMs: now - __zoneCache.refreshedAt,
+        warning: 'stale cache — fusion engine failed',
+      });
+    }
+    res.status(503).json({
+      error: 'Fusion engine unavailable',
+      zones: [],
+      sourcesUsed: [],
+      dataQuality: 'simulated',
+      refreshedAt: new Date(now).toISOString(),
+    });
+  }
+});
+console.log('[FOREAS] /api/zones/live and /api/zones/health mounted at top-level');
+
 // Legal pages served by Vercel (foreas.xyz) — /cgu, /confidentialite, /mentions-legales, /suppression-compte
 
 // ============================================
@@ -81,9 +191,15 @@ app.get('/', (_req, res) => {
 // ============================================
 app.post('/api/internal/rag/ingest', express.json(), async (req, res) => {
   const authHeader = req.headers.authorization;
-  const serviceKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
+  const validKeys = [process.env.SUPABASE_SERVICE_ROLE_KEY, process.env.FOREAS_SERVICE_KEY].filter(
+    Boolean,
+  );
 
-  if (!serviceKey || !authHeader || authHeader !== `Bearer ${serviceKey}`) {
+  if (
+    validKeys.length === 0 ||
+    !authHeader ||
+    !validKeys.some((k) => authHeader === `Bearer ${k}`)
+  ) {
     return res.status(401).json({ error: 'Invalid service key' });
   }
 
@@ -91,11 +207,19 @@ app.post('/api/internal/rag/ingest', express.json(), async (req, res) => {
     const { ingestKnowledgeBase, reingestKnowledgeBase } =
       await import('./ai/rag/ingestKnowledgeBase.js');
     const force = req.body?.force === true;
-    console.log(`[Internal] RAG ingestion triggered (force=${force})`);
+    const sync = req.body?.sync === true;
+    console.log(`[Internal] RAG ingestion triggered (force=${force}, sync=${sync})`);
 
-    const result = force ? await reingestKnowledgeBase() : await ingestKnowledgeBase();
-
-    res.json({ success: true, ...result });
+    if (sync) {
+      const result = force ? await reingestKnowledgeBase() : await ingestKnowledgeBase();
+      res.json({ success: true, ...result });
+    } else {
+      // Async — retour immédiat, ingestion en background
+      res.json({ success: true, status: 'started', message: 'Ingestion lancée en background' });
+      (force ? reingestKnowledgeBase() : ingestKnowledgeBase())
+        .then((r) => console.log(`[Internal] RAG ingestion done: ${r.documentsIndexed} docs`))
+        .catch((e) => console.error(`[Internal] RAG ingestion failed: ${e.message}`));
+    }
   } catch (err: any) {
     console.error('[Internal] RAG ingestion error:', err);
     res.status(500).json({ error: `Ingestion failed: ${err.message}` });
@@ -203,6 +327,41 @@ app.post('/api/webhooks/stripe', express.raw({ type: 'application/json' }), asyn
         );
       }
       markPremiumNow();
+
+      // ── Commissions parrainage ──
+      if (invoice.customer_email) {
+        try {
+          const supaAdmin = await getSupabaseAdmin();
+          const { data: driver } = await supaAdmin
+            .from('drivers')
+            .select('id')
+            .eq('email', invoice.customer_email)
+            .single();
+
+          if (driver) {
+            const amountEur = (invoice.amount_paid || 0) / 100;
+            const commissionRes = await fetch(
+              `http://localhost:${PORT}/api/referral/commission/process`,
+              {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                  driver_id: driver.id,
+                  amount_paid: amountEur,
+                  invoice_id: invoice.id,
+                  subscription_id: invoice.subscription,
+                }),
+              },
+            );
+            const commResult = await commissionRes.json();
+            console.log(
+              `[Stripe] Commissions parrainage : ${commResult.commissions_created || 0} creee(s)`,
+            );
+          }
+        } catch (commErr: any) {
+          console.warn('[Stripe] Erreur commissions parrainage:', commErr.message);
+        }
+      }
     }
 
     // ── invoice.payment_failed ──
@@ -410,6 +569,431 @@ async function loadAjnayaRoutes(): Promise<void> {
   }
 }
 
+// Sprint Activation Conciergerie 30/04 — widget sites perso chauffeurs
+let conciergeRoutesLoaded = false;
+async function loadConciergeRoutes(): Promise<void> {
+  if (conciergeRoutesLoaded) return;
+  try {
+    const conciergeRouter = (await import('./routes/concierge.routes.js')).default;
+    app.use('/api/concierge', conciergeRouter);
+    // Sprint 6 — Acquisition active (Apollo + Apify + Stripe payment-link + RAG pricing)
+    const conciergeAcquisitionRouter = (await import('./routes/conciergeAcquisition.routes.js'))
+      .default;
+    app.use('/api/concierge', conciergeAcquisitionRouter);
+    conciergeRoutesLoaded = true;
+    console.log('[Concierge] Routes mounted at /api/concierge (widget + acquisition + payment)');
+  } catch (err: any) {
+    console.error(`[Concierge] Failed to load: ${err.message}`);
+  }
+}
+
+let referralRoutesLoaded = false;
+async function loadReferralRoutes(): Promise<void> {
+  if (referralRoutesLoaded) return;
+  try {
+    const referralRouter = (await import('./routes/referral.routes.js')).default;
+    app.use('/api/referral', referralRouter);
+    referralRoutesLoaded = true;
+    console.log('[Referral] Routes mounted at /api/referral');
+  } catch (err: any) {
+    console.error(`[Referral] Failed to load: ${err.message}`);
+  }
+}
+
+// ── Wallet Routes ──
+let walletRoutesLoaded = false;
+async function loadWalletRoutes(): Promise<void> {
+  if (walletRoutesLoaded) return;
+  try {
+    const walletRouter = (await import('./routes/wallet.routes.js')).default;
+    app.use('/api', walletRouter);
+    walletRoutesLoaded = true;
+    console.log(
+      '[Wallet] Routes mounted at /api (wallet-summary, payout-request, stripe-onboarding)',
+    );
+  } catch (err: any) {
+    console.error(`[Wallet] Failed to load: ${err.message}`);
+  }
+}
+
+// ── Bolt Fleet Routes ──
+let boltRoutesLoaded = false;
+async function loadBoltRoutes(): Promise<void> {
+  if (boltRoutesLoaded) return;
+  try {
+    const boltRouter = (await import('./routes/bolt.routes.js')).default;
+    app.use('/api/bolt', boltRouter);
+    boltRoutesLoaded = true;
+
+    // Démarrer auto-refresh token Bolt
+    const { boltFleet } = await import('./services/boltFleet.js');
+    boltFleet.startAutoRefresh();
+
+    console.log('[BoltFleet] Routes mounted at /api/bolt');
+  } catch (err: any) {
+    console.error(`[BoltFleet] Failed to load: ${err.message}`);
+  }
+}
+
+// ── Stripe Connect Routes ──
+let stripeConnectLoaded = false;
+async function loadStripeConnectRoutes(): Promise<void> {
+  if (stripeConnectLoaded) return;
+  try {
+    const stripeConnectRouter = (await import('./routes/stripeConnect.routes.js')).default;
+    app.use('/stripe', stripeConnectRouter);
+    stripeConnectLoaded = true;
+    console.log('[StripeConnect] Routes mounted at /stripe/*');
+  } catch (err: any) {
+    console.error(`[StripeConnect] Failed to load: ${err.message}`);
+  }
+}
+
+// ── Pieuvre Routes (Screen Reader + In-App Messages + Concierge Dashboard) ──
+let pieuvreRoutesLoaded = false;
+async function loadPieuvreRoutes(): Promise<void> {
+  if (pieuvreRoutesLoaded) return;
+  try {
+    const pieuvreRouter = (await import('./routes/pieuvre.routes.js')).default;
+    app.use('/api/pieuvre', pieuvreRouter);
+
+    // v104 Clients Directs refonte — Dashboard Concierge aggregate endpoints
+    //   GET /api/pieuvre/dashboard/:driverId (hero + pipeline + hot prospects + timeline)
+    //   GET /api/pieuvre/prospects/:driverId (liste filtrable)
+    //   GET /api/pieuvre/conversations/:driverId (threads actifs WhatsApp/SMS)
+    try {
+      const pieuvreDashboardRouter = (await import('./routes/pieuvreDashboard.js')).default;
+      app.use('/api/pieuvre', pieuvreDashboardRouter);
+      console.log('[Pieuvre] Concierge dashboard routes mounted (v104)');
+    } catch (dashErr: any) {
+      console.error(`[Pieuvre] Concierge dashboard failed to load: ${dashErr.message}`);
+    }
+
+    // v104 Sprint 2 — Concierge Commerciale (voice clone + WhatsApp + plaquette)
+    //   POST   /api/pieuvre/voice/clone      (ElevenLabs IVC)
+    //   GET    /api/pieuvre/voice/status
+    //   DELETE /api/pieuvre/voice
+    //   POST   /api/pieuvre/whatsapp/send    (Meta Cloud API)
+    //   POST   /api/pieuvre/plaquette        (génération PDF queued)
+    try {
+      const pieuvreConciergeRouter = (await import('./routes/pieuvreConcierge.js')).default;
+      app.use('/api/pieuvre', pieuvreConciergeRouter);
+      console.log('[Pieuvre] Concierge action routes mounted (Sprint 2)');
+    } catch (conciergeErr: any) {
+      console.error(`[Pieuvre] Concierge actions failed to load: ${conciergeErr.message}`);
+    }
+
+    // v104 Communauté v3 — Feed, modération Opus 4.7, réactions, follows, notifs
+    //   POST /api/communaute/posts           (modéré Opus)
+    //   GET  /api/communaute/feed            (géo-localisé + filtres)
+    //   POST /api/communaute/posts/:id/react (confirme / infirme / merci)
+    //   POST /api/communaute/posts/:id/flag  (signaler)
+    //   GET  /api/communaute/me/confiance
+    //   GET  /api/communaute/autocomplete    (vocab terrain VTC)
+    //   GET/PUT /api/communaute/prefs        (notifs)
+    //   POST/DELETE /api/communaute/follow/:id
+    try {
+      const communauteRouter = (await import('./routes/communauteRoutes.js')).default;
+      app.use('/api/communaute', communauteRouter);
+      console.log('[Communauté] Routes mounted (Communauté v3, modération Opus 4.7)');
+    } catch (communauteErr: any) {
+      console.error(`[Communauté] Routes failed to load: ${communauteErr.message}`);
+    }
+
+    pieuvreRoutesLoaded = true;
+    console.log('[Pieuvre] Routes mounted at /api/pieuvre');
+  } catch (err: any) {
+    console.error(`[Pieuvre] Failed to load: ${err.message}`);
+  }
+}
+
+let signalsRoutesLoaded = false;
+async function loadSignalsRoutes(): Promise<void> {
+  if (signalsRoutesLoaded) return;
+  try {
+    const { signalsRouter } = await import('./routes/signals.routes.js');
+    app.use('/api/signals', signalsRouter);
+    signalsRoutesLoaded = true;
+    console.log('[Signals] Routes mounted at /api/signals');
+  } catch (err: any) {
+    console.error(`[Signals] Failed to load: ${err.message}`);
+  }
+}
+
+// ── Zones Live Routes (FusionEngine 10 sources → driver HomeScreen) ──
+// B09.3: mount INLINE pour éviter tout problème de dynamic import sur Railway.
+// Le lazy loader précédent échouait silencieusement (404 sur /api/zones/live
+// malgré commit déployé). Inline = maximum visibilité d'erreur au startup.
+async function loadZonesRoutes(): Promise<void> {
+  try {
+    console.log('[Zones] 🚀 Loading zones router (inline, top-level express)...');
+    // Utilise express déjà importé au top du module (évite problème esModuleInterop)
+    const fusionMod = await import('./services/AjnayaFusionEngine.js');
+    const { fuse } = fusionMod;
+
+    if (typeof fuse !== 'function') {
+      console.error('[Zones] ❌ fuse is not a function:', typeof fuse);
+      return;
+    }
+
+    const zonesRouter = express.Router();
+
+    // Cache 30s in-memory
+    let zoneCache: any = null;
+    const CACHE_TTL_MS = 30_000;
+
+    const scoreToLevel = (s: number) =>
+      s >= 80 ? 'SURGE' : s >= 60 ? 'HIGH' : s >= 35 ? 'MEDIUM' : 'LOW';
+    const scoreToMult = (s: number) =>
+      s >= 85 ? 2.0 : s >= 70 ? 1.5 : s >= 55 ? 1.25 : s >= 40 ? 1.1 : 1.0;
+    const scoreToEarn = (s: number) =>
+      s >= 85
+        ? '€45-60/h'
+        : s >= 70
+          ? '€35-50/h'
+          : s >= 55
+            ? '€28-40/h'
+            : s >= 40
+              ? '€22-32/h'
+              : '€18-25/h';
+
+    zonesRouter.get('/health', (_req: any, res: any) => {
+      const now = Date.now();
+      res.json({
+        ok: true,
+        cacheAgeMs: zoneCache ? now - zoneCache.refreshedAt : null,
+        lastSourcesUsed: zoneCache?.sources || [],
+        lastDataQuality: zoneCache?.dataQuality || 'unknown',
+      });
+    });
+
+    zonesRouter.get('/live', async (req: any, res: any) => {
+      const now = Date.now();
+      const bypassCache = req.query.nocache === '1';
+      if (!bypassCache && zoneCache && now - zoneCache.refreshedAt < CACHE_TTL_MS) {
+        return res.json({
+          zones: zoneCache.zones,
+          sourcesUsed: zoneCache.sources,
+          dataQuality: zoneCache.dataQuality === 'live' ? 'cached' : zoneCache.dataQuality,
+          refreshedAt: new Date(zoneCache.refreshedAt).toISOString(),
+          cacheAgeMs: now - zoneCache.refreshedAt,
+          alerts: zoneCache.alerts || [],
+          opportunities: zoneCache.opportunities || [],
+        });
+      }
+      try {
+        const ctx = await fuse('', (req.query.driverId as string) || undefined);
+        const zones = ctx.demandZones.map((z: any) => ({
+          name: z.zone,
+          score: z.score,
+          level: scoreToLevel(z.score),
+          surgeMultiplier: scoreToMult(z.score),
+          estimatedEarnings: scoreToEarn(z.score),
+          reasons: z.reasons.slice(0, 3),
+          sources: z.sources,
+        }));
+        const dataQuality = ctx.sourcesUsed.some((s: string) =>
+          ['openweather', 'predicthq', 'sncf', 'tomtom', 'idfm', 'bolt'].includes(s),
+        )
+          ? 'live'
+          : 'simulated';
+        zoneCache = {
+          zones,
+          sources: ctx.sourcesUsed,
+          dataQuality,
+          refreshedAt: now,
+          alerts: ctx.alerts,
+          opportunities: ctx.opportunities,
+        };
+        res.json({
+          zones,
+          sourcesUsed: ctx.sourcesUsed,
+          dataQuality,
+          refreshedAt: new Date(now).toISOString(),
+          cacheAgeMs: 0,
+          latencyMs: ctx.totalLatency,
+          alerts: ctx.alerts,
+          opportunities: ctx.opportunities,
+        });
+      } catch (err: any) {
+        console.error('[zones.live] fuse failed:', err?.message || err);
+        if (zoneCache) {
+          return res.json({
+            zones: zoneCache.zones,
+            sourcesUsed: zoneCache.sources,
+            dataQuality: 'cached',
+            refreshedAt: new Date(zoneCache.refreshedAt).toISOString(),
+            cacheAgeMs: now - zoneCache.refreshedAt,
+            warning: 'stale cache — fusion engine failed',
+          });
+        }
+        res.status(503).json({
+          error: 'Fusion engine unavailable',
+          zones: [],
+          sourcesUsed: [],
+          dataQuality: 'simulated',
+          refreshedAt: new Date(now).toISOString(),
+        });
+      }
+    });
+
+    app.use('/api/zones', zonesRouter);
+    console.log('[Zones] ✅ Routes mounted at /api/zones (INLINE, FusionEngine → driver)');
+  } catch (err: any) {
+    console.error('[Zones] ❌ Failed to setup inline:', err?.message || err);
+    if (err?.stack) console.error('[Zones] Stack:', err.stack);
+  }
+}
+
+// ── Coach Réflexe Routes ──
+let coachRoutesLoaded = false;
+async function loadCoachRoutes(): Promise<void> {
+  if (coachRoutesLoaded) return;
+  try {
+    const coachRouter = (await import('./routes/coachInstant.js')).default;
+    app.use('/api/coach', coachRouter);
+    coachRoutesLoaded = true;
+    console.log('[Coach] Routes mounted at /api/coach');
+  } catch (err: any) {
+    console.error(`[Coach] Failed to load: ${err.message}`);
+  }
+}
+
+// ── Clients Directs Routes ──
+let clientsDirectsLoaded = false;
+async function loadClientsDirectsRoutes(): Promise<void> {
+  if (clientsDirectsLoaded) return;
+  try {
+    const cdRouter = (await import('./routes/clientsDirects.js')).default;
+    app.use('/api/clients-directs', cdRouter);
+    clientsDirectsLoaded = true;
+    console.log('[ClientsDirects] Routes mounted at /api/clients-directs');
+  } catch (err: any) {
+    console.error(`[ClientsDirects] Failed to load: ${err.message}`);
+  }
+}
+
+// ── Analytics Events Routes ──
+let analyticsEventsLoaded = false;
+async function loadAnalyticsEventsRoutes(): Promise<void> {
+  if (analyticsEventsLoaded) return;
+  try {
+    const aeRouter = (await import('./routes/analyticsEvents.js')).default;
+    app.use('/api/analytics-events', aeRouter);
+    analyticsEventsLoaded = true;
+    console.log('[AnalyticsEvents] Routes mounted at /api/analytics-events');
+  } catch (err: any) {
+    console.error(`[AnalyticsEvents] Failed to load: ${err.message}`);
+  }
+}
+
+// ── Client Finder Routes ──
+let clientFinderLoaded = false;
+async function loadClientFinderRoutes(): Promise<void> {
+  if (clientFinderLoaded) return;
+  try {
+    const cfRouter = (await import('./routes/clientFinder.js')).default;
+    app.use('/api/client-finder', cfRouter);
+    clientFinderLoaded = true;
+    console.log('[ClientFinder] Routes mounted at /api/client-finder');
+  } catch (err: any) {
+    console.error(`[ClientFinder] Failed to load: ${err.message}`);
+  }
+}
+
+// ── Vehicle Routes ── v1.10.47 (Claude Vision verify-photo)
+let vehicleRoutesLoaded = false;
+async function loadVehicleRoutes(): Promise<void> {
+  if (vehicleRoutesLoaded) return;
+  try {
+    const vRouter = (await import('./routes/vehicle.routes.js')).default;
+    app.use('/api/vehicle', vRouter);
+    vehicleRoutesLoaded = true;
+    console.log('[Vehicle] Routes mounted at /api/vehicle');
+  } catch (err: any) {
+    console.error(`[Vehicle] Failed to load: ${err.message}`);
+  }
+}
+
+// ── Voice Routes ── v88
+let voiceRoutesLoaded = false;
+async function loadVoiceRoutes() {
+  if (voiceRoutesLoaded) return;
+  voiceRoutesLoaded = true;
+  try {
+    const { default: voiceRoutes } = await import('./routes/voiceRoutes.js');
+    app.use('/api/voice', voiceRoutes);
+    console.log('✅ Voice routes loaded');
+  } catch (e) {
+    console.error('❌ Voice routes failed:', e);
+  }
+}
+
+// ── Resend Webhooks ──
+let resendWebhooksLoaded = false;
+async function loadResendWebhooks(): Promise<void> {
+  if (resendWebhooksLoaded) return;
+  try {
+    const rwRouter = (await import('./routes/resendWebhooks.js')).default;
+    // Raw body middleware pour HMAC verification
+    app.use('/api/webhooks/resend', express.raw({ type: 'application/json' }), rwRouter);
+    resendWebhooksLoaded = true;
+    console.log('[ResendWebhooks] Mounted at /api/webhooks/resend');
+  } catch (err: any) {
+    console.error(`[ResendWebhooks] Failed to load: ${err.message}`);
+  }
+}
+
+// ── Internal Cron Routes ── Ajnaya2026v87.2
+let internalCronLoaded = false;
+async function loadInternalCronRoutes(): Promise<void> {
+  if (internalCronLoaded) return;
+  try {
+    const icRouter = (await import('./routes/internalCron.js')).default;
+    app.use('/api/internal', icRouter);
+    internalCronLoaded = true;
+    console.log('[InternalCron] Routes mounted at /api/internal');
+  } catch (err: any) {
+    console.error(`[InternalCron] Failed to load: ${err.message}`);
+  }
+}
+
+// ── Opt-out Routes (RGPD) ── Ajnaya2026v87.1
+let optoutRoutesLoaded = false;
+async function loadOptoutRoutes(): Promise<void> {
+  if (optoutRoutesLoaded) return;
+  try {
+    const optRouter = (await import('./routes/optoutRoutes.js')).default;
+    // Monté à la racine : GET /optout/:token
+    app.use('/', optRouter);
+    optoutRoutesLoaded = true;
+    console.log('[Optout] Mounted at /optout/:token');
+  } catch (err: any) {
+    console.error(`[Optout] Failed to load: ${err.message}`);
+  }
+}
+
+// ── Finder Inbound Webhook (Resend Inbound) ── Ajnaya2026v87
+let finderInboundLoaded = false;
+async function loadFinderInboundRoutes(): Promise<void> {
+  if (finderInboundLoaded) return;
+  try {
+    const fiRouter = (await import('./routes/resendInbound.js')).default;
+    // JSON parser avec verify callback pour exposer rawBody (Svix HMAC)
+    const jsonWithRaw = express.json({
+      limit: '2mb',
+      verify: (req, _res, buf) => {
+        (req as any).rawBody = buf.toString('utf8');
+      },
+    });
+    app.use('/api/webhooks', jsonWithRaw, fiRouter);
+    finderInboundLoaded = true;
+    console.log('[FinderInbound] Mounted at /api/webhooks/resend-inbound');
+  } catch (err: any) {
+    console.error(`[FinderInbound] Failed to load: ${err.message}`);
+  }
+}
+
 // Charger toutes les routes après le serveur prêt
 setTimeout(() => {
   loadOtpRoutes();
@@ -418,6 +1002,24 @@ setTimeout(() => {
   loadAnalyticsRoutes();
   loadBookingRoutes();
   loadAjnayaRoutes();
+  loadConciergeRoutes();
+  loadReferralRoutes();
+  loadWalletRoutes();
+  loadBoltRoutes();
+  loadStripeConnectRoutes();
+  loadPieuvreRoutes();
+  loadSignalsRoutes();
+  loadZonesRoutes();
+  loadCoachRoutes();
+  loadClientsDirectsRoutes();
+  loadAnalyticsEventsRoutes();
+  loadClientFinderRoutes();
+  loadVehicleRoutes();
+  loadVoiceRoutes();
+  loadResendWebhooks();
+  loadOptoutRoutes();
+  loadInternalCronRoutes();
+  loadFinderInboundRoutes();
 }, 0);
 
 // ============================================
@@ -585,7 +1187,7 @@ app.post('/api/tts', express.json(), async (req: any, res: any) => {
   }
 
   const ELEVEN_KEY = process.env.ELEVENLABS_API_KEY;
-  const VOICE_ID = voice_id || process.env.ELEVENLABS_VOICE_ID || '21m00Tcm4TlvDq8ikWAM';
+  const VOICE_ID = voice_id || process.env.ELEVENLABS_VOICE_ID || 'MNKK2Wl2wbbsEPQTHZGt'; // Koraly - French conversational
 
   if (!ELEVEN_KEY) {
     return res.status(503).json({ error: 'TTS not configured' });
@@ -871,19 +1473,70 @@ async function getSupabaseAdmin() {
 }
 
 // ── Helper : générer un slug unique à partir du nom ──────────
+// v104 Sprint 3A — Format mémorable : `prenom-XX` (ex: karim-47, yasmine-02)
+// Principe Krug "Don't Make Me Think" : le slug doit se lire, pas se déchiffrer.
+// Principe Cialdini (liking) : entendre son prénom crée affinité instantanée.
+//
+// Collision : les 2 chiffres offrent 100 combinaisons par prénom.
+// Le caller doit vérifier l'unicité dans driver_sites et re-générer si besoin.
 function generateSlug(name: string): string {
-  // Use ONLY first name for cleaner, shorter slugs (e.g. chandler-a9x2)
-  const firstName = name.split(/[\s-]+/)[0] || name;
-  const base = firstName
-    .toLowerCase()
-    .normalize('NFD')
-    .replace(/[\u0300-\u036f]/g, '')
-    .replace(/[^a-z0-9]+/g, '-')
-    .replace(/^-|-$/g, '')
-    .substring(0, 20);
-  const suffix = Math.random().toString(36).substring(2, 6);
-  return `${base}-${suffix}`;
+  const firstName =
+    (name.trim().split(/[\s-]+/)[0] || 'chauffeur')
+      .normalize('NFD')
+      .replace(/[\u0300-\u036f]/g, '') // retire accents
+      .replace(/[^a-zA-Z]/g, '') // retire tout sauf lettres
+      .toLowerCase()
+      .substring(0, 20) || // limite pour URL propre
+    'chauffeur';
+  const digits = Math.floor(Math.random() * 90 + 10); // 10-99
+  return `${firstName}-${digits}`;
 }
+
+// Vérifie qu'un slug est dispo — sinon re-génère jusqu'à 8 tentatives
+async function generateUniqueSlug(name: string): Promise<string> {
+  const supa = await getSupabaseAdmin();
+  for (let i = 0; i < 8; i++) {
+    const candidate = generateSlug(name);
+    const { data } = await supa
+      .from('driver_sites')
+      .select('id')
+      .eq('slug', candidate)
+      .maybeSingle();
+    if (!data) return candidate;
+  }
+  // Fallback : ajout timestamp pour garantir unicité
+  return `${generateSlug(name)}-${Date.now().toString(36).slice(-4)}`;
+}
+
+// Liste des segments URL qui NE sont PAS des slugs chauffeur (réservés)
+// Utilisée par la route catch-all `app.get('/:slug')` pour ignorer
+// les routes API, pages légales, webhooks, assets, etc.
+const RESERVED_URL_SEGMENTS = new Set([
+  'api',
+  'webhooks',
+  'c',
+  'v1',
+  'v2',
+  'health',
+  'healthz',
+  'cgu',
+  'confidentialite',
+  'mentions-legales',
+  'suppression-compte',
+  'robots.txt',
+  'favicon.ico',
+  'sitemap.xml',
+  'apple-touch-icon.png',
+  'admin',
+  'auth',
+  'login',
+  'logout',
+  'signup',
+  'public',
+  'static',
+  'assets',
+  '_next',
+]);
 
 // ── Helper : générer un code promo unique (voucher-code-generator) ──
 function generatePromoCode(name: string): string {
@@ -1843,10 +2496,8 @@ ${
 </body></html>`;
 }
 
-// ── GET /c/:slug — Page publique passager ────────────────────
-app.get('/c/:slug', async (req: any, res: any) => {
-  const { slug } = req.params;
-  const source = (req.query.src as string) || 'link';
+// ── Shared render handler ────────────────────────────────────
+async function renderDriverSiteBySlug(slug: string, source: string, res: any): Promise<any> {
   try {
     const supa = await getSupabaseAdmin();
     const { data: site, error } = await supa
@@ -1877,6 +2528,37 @@ app.get('/c/:slug', async (req: any, res: any) => {
     console.error('[DriverSite] render error:', err.message);
     return res.status(500).send('<p>Erreur serveur</p>');
   }
+}
+
+// ── GET /c/:slug — Legacy route (compat slugs existants pré-v104) ──
+app.get('/c/:slug', async (req: any, res: any) => {
+  const { slug } = req.params;
+  const source = (req.query.src as string) || 'link';
+  return renderDriverSiteBySlug(slug, source, res);
+});
+
+// ── GET /:slug — v104 Sprint 3A — URL directe foreas.xyz/prenom-XX ──
+// Catch-all qui sert les sites chauffeur via URL racine.
+// Garde-fou : filtre les segments réservés (api, webhooks, pages légales, etc.)
+// pour ne pas intercepter les autres routes du backend.
+app.get('/:slug', async (req: any, res: any, next: any) => {
+  const { slug } = req.params;
+
+  // Ignore les routes réservées → laisse passer au middleware suivant
+  if (RESERVED_URL_SEGMENTS.has(slug.toLowerCase())) {
+    return next();
+  }
+  // Ignore les fichiers avec extension (.txt, .ico, .png, etc.)
+  if (/\.[a-z0-9]{2,5}$/i.test(slug)) {
+    return next();
+  }
+  // Validation format attendu : prenom-XX (lettres + tiret + chiffres)
+  if (!/^[a-z][a-z0-9-]{1,40}$/i.test(slug)) {
+    return next();
+  }
+
+  const source = (req.query.src as string) || 'link';
+  return renderDriverSiteBySlug(slug, source, res);
 });
 
 // ── POST /api/driver-site/generate — Créer / mettre à jour le site ──
@@ -1907,7 +2589,7 @@ app.post('/api/driver-site/generate', async (req: any, res: any) => {
       .select('id,slug')
       .eq('driver_id', driver_id)
       .single();
-    const slug = existing?.slug || generateSlug(display_name);
+    const slug = existing?.slug || (await generateUniqueSlug(display_name));
     const generatedBio =
       bio ||
       generateBio(
@@ -2424,7 +3106,7 @@ if (process.env.NODE_ENV !== 'production') {
 // ============================================
 // SERVER START
 // ============================================
-app.listen(PORT, HOST, () => {
+const server = app.listen(PORT, HOST, () => {
   console.log(`[FOREAS] Backend v${VERSION} (${GIT_SHA.substring(0, 7)})`);
   console.log(`[FOREAS] Listening on ${HOST}:${PORT}`);
   console.log(`[FOREAS] Health: http://localhost:${PORT}/health`);
