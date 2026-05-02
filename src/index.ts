@@ -249,6 +249,30 @@ async function getStripe(): Promise<import('stripe').default> {
 }
 
 // ============================================
+// PIEUVRE MLM WEBHOOK — fire-and-forget
+// ============================================
+/**
+ * Notifie Pieuvre N8N d'un événement MLM.
+ * Jamais bloquant — l'absence de Pieuvre ne casse pas le flux Stripe.
+ */
+function notifyPieuvreMlmEvent(event: string, payload: Record<string, any>): void {
+  const webhookUrl = process.env.PIEUVRE_MLM_WEBHOOK_URL;
+  const secret = process.env.PIEUVRE_MLM_SECRET;
+  if (!webhookUrl || !secret) return;
+  fetch(webhookUrl, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'X-Foreas-Shared-Secret': secret,
+    },
+    body: JSON.stringify({ event, ...payload }),
+  }).catch((err) => {
+    console.warn(`[Pieuvre] fire-and-forget failed for event "${event}":`, err?.message);
+  });
+  console.log(`[Pieuvre] Notified event="${event}"`);
+}
+
+// ============================================
 // STRIPE WEBHOOK - AVANT express.json()
 // ============================================
 app.post('/api/webhooks/stripe', express.raw({ type: 'application/json' }), async (req, res) => {
@@ -291,6 +315,90 @@ app.post('/api/webhooks/stripe', express.raw({ type: 'application/json' }), asyn
         );
         console.log('✅ Subscription activée pour:', session.customer_email);
       }
+
+      // ── MLM : attribution parrainage au checkout ──
+      // Si client_reference_id = code parrainage, on lie le filleul à son sponsor
+      if (session.client_reference_id && session.customer_email) {
+        try {
+          const supaAdmin = await getSupabaseAdmin();
+          const referralCode = String(session.client_reference_id).toUpperCase().trim();
+
+          // Trouver le nouveau chauffeur (créé par upsertUserByEmail ci-dessus)
+          const { data: newDriver } = await supaAdmin
+            .from('drivers')
+            .select('id, referred_by, referred_by_partner')
+            .eq('email', session.customer_email)
+            .maybeSingle();
+
+          if (newDriver && !newDriver.referred_by && !newDriver.referred_by_partner) {
+            // 1) Chercher sponsor chauffeur par referral_code
+            const { data: sponsorDriver } = await supaAdmin
+              .from('drivers')
+              .select('id')
+              .eq('referral_code', referralCode)
+              .maybeSingle();
+
+            if (sponsorDriver) {
+              await supaAdmin
+                .from('drivers')
+                .update({ referred_by: sponsorDriver.id })
+                .eq('id', newDriver.id);
+              // Créer le lien N1 dans la table referrals (idempotent via upsert)
+              await supaAdmin
+                .from('referrals')
+                .upsert(
+                  {
+                    sponsor_id: sponsorDriver.id,
+                    referred_id: newDriver.id,
+                    level: 1,
+                    status: 'active',
+                  },
+                  { onConflict: 'sponsor_id,referred_id' },
+                );
+              console.log(
+                `[MLM] Driver ${newDriver.id} parrainé par driver ${sponsorDriver.id} (code=${referralCode})`,
+              );
+            } else {
+              // 2) Chercher sponsor partner par referral_code
+              const { data: sponsorPartner } = await supaAdmin
+                .from('partners')
+                .select('id')
+                .eq('referral_code', referralCode)
+                .maybeSingle();
+
+              if (sponsorPartner) {
+                await supaAdmin
+                  .from('drivers')
+                  .update({ referred_by_partner: sponsorPartner.id })
+                  .eq('id', newDriver.id);
+                // Créer le lien dans partner_referrals (idempotent via upsert)
+                await supaAdmin.from('partner_referrals').upsert(
+                  {
+                    partner_id: sponsorPartner.id,
+                    driver_id: newDriver.id,
+                    signup_date: new Date().toISOString(),
+                    subscription_status: 'active',
+                  },
+                  { onConflict: 'partner_id,driver_id' },
+                );
+                console.log(
+                  `[MLM] Driver ${newDriver.id} parrainé par partner ${sponsorPartner.id} (code=${referralCode})`,
+                );
+              } else {
+                console.log(
+                  `[MLM] checkout: code_parrainage="${referralCode}" — aucun sponsor trouvé`,
+                );
+              }
+            }
+          }
+        } catch (mlmInitErr: any) {
+          console.warn(
+            '[MLM] Attribution parrainage checkout failed (non-blocking):',
+            mlmInitErr?.message,
+          );
+        }
+      }
+
       markPremiumNow();
     }
 
@@ -328,17 +436,67 @@ app.post('/api/webhooks/stripe', express.raw({ type: 'application/json' }), asyn
       }
       markPremiumNow();
 
-      // ── Commissions parrainage ──
+      // ── MLM : payments_counter + qualification + Pieuvre ──
       if (invoice.customer_email) {
         try {
           const supaAdmin = await getSupabaseAdmin();
           const { data: driver } = await supaAdmin
             .from('drivers')
-            .select('id')
+            .select(
+              'id, payments_counter, qualified_for_referral, first_name, referred_by, referred_by_partner',
+            )
             .eq('email', invoice.customer_email)
             .single();
 
           if (driver) {
+            // 1) Incrémenter le compteur de paiements hebdomadaires consécutifs
+            const newCounter = (driver.payments_counter ?? 0) + 1;
+            const alreadyQualified = driver.qualified_for_referral ?? false;
+            const nowQualified = newCounter >= 4;
+
+            await supaAdmin
+              .from('drivers')
+              .update({
+                subscription_active: true,
+                payments_counter: newCounter,
+                ...(nowQualified && !alreadyQualified
+                  ? {
+                      qualified_for_referral: true,
+                      first_qualified_at: new Date().toISOString(),
+                    }
+                  : {}),
+              })
+              .eq('id', driver.id);
+
+            console.log(
+              `[MLM] Driver ${driver.id}: payments_counter=${newCounter}, qualified=${nowQualified}`,
+            );
+
+            // 2) Si vient de se qualifier → notifier Pieuvre avec les sponsors
+            if (nowQualified && !alreadyQualified) {
+              // Chercher N1 (referred_by = driver sponsor OU referred_by_partner = partner sponsor)
+              const sponsors: Array<{ type: string; id: string; level: number; amount: number }> =
+                [];
+              // N1 driver
+              if (driver.referred_by) {
+                sponsors.push({ type: 'driver', id: driver.referred_by, level: 1, amount: 10 });
+              }
+              // N1 partner
+              if (driver.referred_by_partner) {
+                sponsors.push({
+                  type: 'partner',
+                  id: driver.referred_by_partner,
+                  level: 1,
+                  amount: 10,
+                });
+              }
+              notifyPieuvreMlmEvent('mlm_filleul_qualified', {
+                driver_id: driver.id,
+                sponsors,
+              });
+            }
+
+            // 3) Appel legacy commissions immédiates (système N1 hebdo — coexiste avec le cron MLM mensuel)
             const amountEur = (invoice.amount_paid || 0) / 100;
             const commissionRes = await fetch(
               `http://localhost:${PORT}/api/referral/commission/process`,
@@ -355,11 +513,11 @@ app.post('/api/webhooks/stripe', express.raw({ type: 'application/json' }), asyn
             );
             const commResult = await commissionRes.json();
             console.log(
-              `[Stripe] Commissions parrainage : ${commResult.commissions_created || 0} creee(s)`,
+              `[Stripe] Commissions parrainage legacy : ${commResult.commissions_created || 0} creee(s)`,
             );
           }
         } catch (commErr: any) {
-          console.warn('[Stripe] Erreur commissions parrainage:', commErr.message);
+          console.warn('[Stripe] Erreur MLM/commissions:', commErr.message);
         }
       }
     }
@@ -392,6 +550,24 @@ app.post('/api/webhooks/stripe', express.raw({ type: 'application/json' }), asyn
           });
           await sendPaymentFailedFinal(invoice.customer_email, name);
           await sendSubscriptionSuspended(invoice.customer_email, name);
+          // ── MLM : reset payments_counter sur échec final ──
+          // Sans ce reset, un chauffeur qui a payé 3 fois puis rate 3 fois
+          // pourrait se requalifier en 1 seul paiement à la réinscription.
+          try {
+            const supaAdmin = await getSupabaseAdmin();
+            await supaAdmin
+              .from('drivers')
+              .update({ subscription_active: false, payments_counter: 0 })
+              .eq('email', invoice.customer_email);
+            console.log(
+              `[MLM] payments_counter reset (final failure) for ${invoice.customer_email}`,
+            );
+          } catch (resetErr: any) {
+            console.warn(
+              '[MLM] reset payments_counter on final failure (non-blocking):',
+              resetErr?.message,
+            );
+          }
         }
       }
     }
@@ -455,6 +631,90 @@ app.post('/api/webhooks/stripe', express.raw({ type: 'application/json' }), asyn
         });
         await logEvent(user.id, 'customer.subscription.deleted', subscription);
         await sendSubscriptionCanceled(customerEmail, subscription.metadata?.name || 'Chauffeur');
+
+        // ── MLM : marquer filleul inactif + notifier sponsors (fire-and-forget) ──
+        try {
+          const supaAdmin = await getSupabaseAdmin();
+          const { data: driver } = await supaAdmin
+            .from('drivers')
+            .select('id, referred_by, referred_by_partner')
+            .eq('email', customerEmail)
+            .single();
+
+          if (driver) {
+            // Reset subscription_active et payments_counter
+            await supaAdmin
+              .from('drivers')
+              .update({ subscription_active: false, payments_counter: 0 })
+              .eq('id', driver.id);
+
+            // Remonter les 3 niveaux de sponsors affectés
+            const sponsorsAffected: Array<{
+              id: string;
+              type: string;
+              level: number;
+              lost_monthly_amount: number;
+            }> = [];
+
+            if (driver.referred_by) {
+              sponsorsAffected.push({
+                id: driver.referred_by,
+                type: 'driver',
+                level: 1,
+                lost_monthly_amount: 10,
+              });
+              // N2
+              const { data: n1 } = await supaAdmin
+                .from('drivers')
+                .select('referred_by')
+                .eq('id', driver.referred_by)
+                .maybeSingle();
+              if (n1?.referred_by) {
+                sponsorsAffected.push({
+                  id: n1.referred_by,
+                  type: 'driver',
+                  level: 2,
+                  lost_monthly_amount: 4,
+                });
+                // N3
+                const { data: n2 } = await supaAdmin
+                  .from('drivers')
+                  .select('referred_by')
+                  .eq('id', n1.referred_by)
+                  .maybeSingle();
+                if (n2?.referred_by) {
+                  sponsorsAffected.push({
+                    id: n2.referred_by,
+                    type: 'driver',
+                    level: 3,
+                    lost_monthly_amount: 2,
+                  });
+                }
+              }
+            } else if (driver.referred_by_partner) {
+              // Filleul via partner : N1 uniquement (cascade identique mais pivot = partner)
+              sponsorsAffected.push({
+                id: driver.referred_by_partner,
+                type: 'partner',
+                level: 1,
+                lost_monthly_amount: 10,
+              });
+            }
+
+            if (sponsorsAffected.length > 0) {
+              notifyPieuvreMlmEvent('mlm_filleul_lost', {
+                driver_id_filleul: driver.id,
+                sponsors_affected: sponsorsAffected,
+              });
+            }
+
+            console.log(
+              `[Stripe] MLM churn: driver=${driver.id}, sponsors_notified=${sponsorsAffected.length}`,
+            );
+          }
+        } catch (mlmChurnErr: any) {
+          console.warn('[Stripe] MLM churn notify error (non-blocking):', mlmChurnErr.message);
+        }
       }
     }
 
