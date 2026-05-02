@@ -958,6 +958,21 @@ async function loadInternalCronRoutes(): Promise<void> {
   }
 }
 
+// ── MLM Routes (admin partners + public CAP) ── v1.10.55
+let mlmRoutesLoaded = false;
+async function loadMlmRoutes(): Promise<void> {
+  if (mlmRoutesLoaded) return;
+  try {
+    const mlmRouter = (await import('./routes/mlm.routes.js')).default;
+    // Monté à racine /api : routes commencent par /admin/* ou /public/*
+    app.use('/api', mlmRouter);
+    mlmRoutesLoaded = true;
+    console.log('[MLM] Routes mounted at /api/admin/partners + /api/public/partners');
+  } catch (err: any) {
+    console.error(`[MLM] Failed to load: ${err.message}`);
+  }
+}
+
 // ── Opt-out Routes (RGPD) ── Ajnaya2026v87.1
 let optoutRoutesLoaded = false;
 async function loadOptoutRoutes(): Promise<void> {
@@ -1019,6 +1034,7 @@ setTimeout(() => {
   loadResendWebhooks();
   loadOptoutRoutes();
   loadInternalCronRoutes();
+  loadMlmRoutes();
   loadFinderInboundRoutes();
 }, 0);
 

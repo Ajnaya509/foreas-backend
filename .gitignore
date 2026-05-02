@@ -5,3 +5,5 @@ build
 expo
 CREDENTIALS.md
 
+.env.local
+ios/.xcode.env
