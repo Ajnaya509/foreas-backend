@@ -227,6 +227,88 @@ app.post('/api/internal/rag/ingest', express.json(), async (req, res) => {
 });
 
 // ============================================
+// INTERNAL: Backfill embeddings for existing document_chunks
+// (Pour chunks déjà insérés en SQL sans embedding — namespace ajnaya_product PHASE B)
+// ============================================
+app.post('/api/internal/rag/backfill-embeddings', express.json(), async (req, res) => {
+  const authHeader = req.headers.authorization;
+  const validKeys = [process.env.SUPABASE_SERVICE_ROLE_KEY, process.env.FOREAS_SERVICE_KEY].filter(
+    Boolean,
+  );
+  if (
+    validKeys.length === 0 ||
+    !authHeader ||
+    !validKeys.some((k) => authHeader === `Bearer ${k}`)
+  ) {
+    return res.status(401).json({ error: 'Invalid service key' });
+  }
+
+  const namespace = (req.body?.namespace as string) || 'ajnaya_product';
+  const limit = Math.min(Math.max(Number(req.body?.limit) || 100, 1), 500);
+
+  try {
+    const { createClient } = await import('@supabase/supabase-js');
+    const sb = createClient(
+      process.env.SUPABASE_URL || process.env.URL_SUPABASE || '',
+      process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_SERVICE_KEY || '',
+    );
+
+    const { data: chunks, error: fetchErr } = await sb
+      .from('document_chunks')
+      .select('id, chunk_text')
+      .eq('namespace', namespace)
+      .is('embedding', null)
+      .limit(limit);
+
+    if (fetchErr) return res.status(500).json({ error: `Fetch failed: ${fetchErr.message}` });
+    if (!chunks || chunks.length === 0)
+      return res.json({ success: true, indexed: 0, message: 'No chunks to backfill' });
+
+    const { getOpenAIClient } = await import('./ai/llm/providers/OpenAIClient.js');
+    const openai = getOpenAIClient();
+    if (!openai.isConfigured()) return res.status(500).json({ error: 'OpenAI not configured' });
+
+    let indexed = 0;
+    const errors: string[] = [];
+
+    // Batch by 16 to stay under OpenAI rate limits
+    for (let i = 0; i < chunks.length; i += 16) {
+      const batch = chunks.slice(i, i + 16);
+      try {
+        const resp = await openai.embed({
+          model: 'text-embedding-3-small',
+          input: batch.map((c) => c.chunk_text || ''),
+        });
+        for (let j = 0; j < batch.length; j++) {
+          const emb = resp.embeddings[j];
+          if (emb && emb.length === 1536) {
+            const { error: upErr } = await sb
+              .from('document_chunks')
+              .update({ embedding: `[${emb.join(',')}]` })
+              .eq('id', batch[j].id);
+            if (upErr) errors.push(`${batch[j].id}: ${upErr.message}`);
+            else indexed++;
+          }
+        }
+      } catch (e: any) {
+        errors.push(`Batch ${i}: ${e.message}`);
+      }
+    }
+
+    res.json({
+      success: true,
+      namespace,
+      total: chunks.length,
+      indexed,
+      errors: errors.slice(0, 5),
+    });
+  } catch (err: any) {
+    console.error('[Internal] Backfill error:', err);
+    res.status(500).json({ error: `Backfill failed: ${err.message}` });
+  }
+});
+
+// ============================================
 // LAZY STRIPE - Chargé au premier usage
 // ============================================
 let stripeClient: import('stripe').default | null = null;
@@ -344,17 +426,15 @@ app.post('/api/webhooks/stripe', express.raw({ type: 'application/json' }), asyn
                 .update({ referred_by: sponsorDriver.id })
                 .eq('id', newDriver.id);
               // Créer le lien N1 dans la table referrals (idempotent via upsert)
-              await supaAdmin
-                .from('referrals')
-                .upsert(
-                  {
-                    sponsor_id: sponsorDriver.id,
-                    referred_id: newDriver.id,
-                    level: 1,
-                    status: 'active',
-                  },
-                  { onConflict: 'sponsor_id,referred_id' },
-                );
+              await supaAdmin.from('referrals').upsert(
+                {
+                  sponsor_id: sponsorDriver.id,
+                  referred_id: newDriver.id,
+                  level: 1,
+                  status: 'active',
+                },
+                { onConflict: 'sponsor_id,referred_id' },
+              );
               console.log(
                 `[MLM] Driver ${newDriver.id} parrainé par driver ${sponsorDriver.id} (code=${referralCode})`,
               );
@@ -1479,8 +1559,17 @@ app.post('/api/tts', express.json(), async (req: any, res: any) => {
       },
       body: JSON.stringify({
         text: text.trim(),
-        model_id: 'eleven_multilingual_v2',
-        voice_settings: { stability: 0.72, similarity_boost: 0.85, style: 0.1 },
+        // 🎙️ ElevenLabs v3 — supporte audio tags non-verbaux ([laughs softly],
+        // [sighs], [hmm], [confident], [matter of fact], [firmly]) injectés dans le
+        // prompt système pour humaniser Koraly. NE PAS revenir sur multilingual_v2.
+        // ⚠️ Vérifié via /v1/models : can_use_style=false, can_use_speaker_boost=false
+        //    → on les omet (silencieusement ignorés par l'API v3).
+        model_id: 'eleven_v3',
+        voice_settings: {
+          stability: 0.4,
+          similarity_boost: 0.75,
+          speed: 1.22,
+        },
       }),
     });
 
