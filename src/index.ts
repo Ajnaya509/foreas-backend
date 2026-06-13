@@ -920,8 +920,13 @@ async function loadConciergeRoutes(): Promise<void> {
     const conciergeAcquisitionRouter = (await import('./routes/conciergeAcquisition.routes.js'))
       .default;
     app.use('/api/concierge', conciergeAcquisitionRouter);
+    // Pieuvre2026(v12) — reveal-phone sécurisé + loggé (RGPD + anti-scrape)
+    const conciergeRevealRouter = (await import('./routes/conciergeReveal.routes.js')).default;
+    app.use('/api/concierge', conciergeRevealRouter);
     conciergeRoutesLoaded = true;
-    console.log('[Concierge] Routes mounted at /api/concierge (widget + acquisition + payment)');
+    console.log(
+      '[Concierge] Routes mounted at /api/concierge (widget + acquisition + reveal + payment)',
+    );
   } catch (err: any) {
     console.error(`[Concierge] Failed to load: ${err.message}`);
   }

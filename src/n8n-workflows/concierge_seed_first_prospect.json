@@ -1,0 +1,195 @@
+{
+  "name": "CONCIERGE_SEED_FIRST_PROSPECT",
+  "nodes": [
+    {
+      "id": "trigger-schedule-001",
+      "name": "Cron 15min",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.1,
+      "position": [200, 300],
+      "parameters": {
+        "rule": {
+          "interval": [{ "field": "minutes", "minutesInterval": 15 }]
+        }
+      }
+    },
+    {
+      "id": "find-orphans-001",
+      "name": "Drivers activés sans prospect (24h)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [420, 300],
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.SUPABASE_URL }}/rest/v1/rpc/find_drivers_needing_seed",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "apikey", "value": "={{ $env.SUPABASE_SERVICE_KEY }}" },
+            { "name": "Authorization", "value": "=Bearer {{ $env.SUPABASE_SERVICE_KEY }}" },
+            { "name": "Content-Type", "value": "application/json" }
+          ]
+        },
+        "sendBody": true,
+        "contentType": "json",
+        "body": "={{ JSON.stringify({}) }}"
+      },
+      "onError": "continueErrorOutput"
+    },
+    {
+      "id": "split-drivers-001",
+      "name": "Pour chaque driver",
+      "type": "n8n-nodes-base.splitInBatches",
+      "typeVersion": 3,
+      "position": [640, 300],
+      "parameters": { "batchSize": 1 }
+    },
+    {
+      "id": "scrape-places-001",
+      "name": "Apify Google Maps (3km)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [860, 250],
+      "parameters": {
+        "method": "POST",
+        "url": "=https://api.apify.com/v2/acts/compass~google-maps-extractor/run-sync-get-dataset-items?token={{ $env.APIFY_TOKEN }}",
+        "sendBody": true,
+        "contentType": "json",
+        "body": "={{ JSON.stringify({ searchStringsArray: ['restaurant','hôtel','bar'], locationQuery: $json.city || 'Paris', maxCrawledPlacesPerSearch: 5, language: 'fr', radius: 3000 }) }}",
+        "options": { "timeout": 60000 }
+      },
+      "onError": "continueErrorOutput"
+    },
+    {
+      "id": "pick-fallback-001",
+      "name": "Fallback hunter log proche",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [860, 380],
+      "parameters": {
+        "method": "GET",
+        "url": "={{ $env.SUPABASE_URL }}/rest/v1/pieuvre_b2b_hunter_log?driver_id=is.null&order=detected_at.desc&limit=1&select=*",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "apikey", "value": "={{ $env.SUPABASE_SERVICE_KEY }}" },
+            { "name": "Authorization", "value": "=Bearer {{ $env.SUPABASE_SERVICE_KEY }}" }
+          ]
+        }
+      },
+      "onError": "continueErrorOutput"
+    },
+    {
+      "id": "build-prospect-001",
+      "name": "Build prospect payload",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1080, 300],
+      "parameters": {
+        "jsCode": "// Pieuvre2026(v12) — assemble le 1er prospect seed à insérer\n// Reçoit en input le driver courant + (places scrapées OU fallback log) selon la branche\nconst driver = $('Pour chaque driver').item.json;\n\nlet place = null;\nlet source = 'apify_google_maps';\n\n// Tente l'Apify d'abord\ntry {\n  const apifyOut = $('Apify Google Maps (3km)').first()?.json;\n  if (Array.isArray(apifyOut) && apifyOut.length) {\n    place = apifyOut[Math.floor(Math.random() * Math.min(apifyOut.length, 5))];\n  } else if (apifyOut && Array.isArray(apifyOut.items) && apifyOut.items.length) {\n    place = apifyOut.items[0];\n  }\n} catch (e) {}\n\n// Sinon fallback hunter log\nif (!place) {\n  try {\n    const fallback = $('Fallback hunter log proche').first()?.json;\n    if (Array.isArray(fallback) && fallback.length) {\n      const f = fallback[0];\n      return [{ json: {\n        driver_id: driver.driver_id,\n        business_name: f.business_name,\n        business_address: f.business_address,\n        business_lat: f.business_lat,\n        business_lng: f.business_lng,\n        business_type: f.business_type || 'restaurant',\n        contact_name: f.contact_name,\n        contact_phone: f.contact_phone,\n        contact_email: f.contact_email,\n        status: 'seed',\n        meta: { seed_source: 'fallback_hunter_log', warm_up: true, original_id: f.id },\n        detected_at: new Date().toISOString(),\n      }}];\n    }\n  } catch (e) {}\n}\n\nif (!place) {\n  return []; // Rien à seed pour ce driver — boucle suivante\n}\n\n// Place Apify → row hunter log\nconst row = {\n  driver_id: driver.driver_id,\n  business_name: place.title || place.name || 'Établissement local',\n  business_address: place.address || place.location?.address || null,\n  business_lat: place.location?.lat || place.coordinates?.lat || null,\n  business_lng: place.location?.lng || place.coordinates?.lng || null,\n  business_type: place.category || place.categoryName || 'restaurant',\n  contact_phone: place.phone || place.phoneNumber || null,\n  contact_email: place.email || null,\n  status: 'seed',\n  meta: { seed_source: source, place_id: place.placeId || place.id, raw: place },\n  detected_at: new Date().toISOString(),\n};\nreturn [{ json: row }];\n"
+      }
+    },
+    {
+      "id": "insert-prospect-001",
+      "name": "INSERT pieuvre_b2b_hunter_log",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [1300, 300],
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.SUPABASE_URL }}/rest/v1/pieuvre_b2b_hunter_log",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "apikey", "value": "={{ $env.SUPABASE_SERVICE_KEY }}" },
+            { "name": "Authorization", "value": "=Bearer {{ $env.SUPABASE_SERVICE_KEY }}" },
+            { "name": "Content-Type", "value": "application/json" },
+            { "name": "Prefer", "value": "return=representation" }
+          ]
+        },
+        "sendBody": true,
+        "contentType": "json",
+        "body": "={{ JSON.stringify($json) }}"
+      }
+    },
+    {
+      "id": "push-driver-001",
+      "name": "Push Ajnaya t'a trouvé ton 1er client",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [1520, 300],
+      "parameters": {
+        "method": "POST",
+        "url": "https://exp.host/--/api/v2/push/send",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [{ "name": "Content-Type", "value": "application/json" }]
+        },
+        "sendBody": true,
+        "contentType": "json",
+        "body": "={{ JSON.stringify({ to: $('Pour chaque driver').item.json.push_tokens || [], title: \"🎯 Ajnaya t'a trouvé ton 1er client\", body: ($json[0]?.business_name || 'Un prospect') + ' — touche pour voir', data: { type: 'concierge_first_seed', prospect_id: $json[0]?.id } }) }}",
+        "options": { "timeout": 10000 }
+      },
+      "onError": "continueErrorOutput"
+    },
+    {
+      "id": "log-watchdog-001",
+      "name": "Log seed event",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [1740, 300],
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.SUPABASE_URL }}/rest/v1/pieuvre_watchdog_logs",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "apikey", "value": "={{ $env.SUPABASE_SERVICE_KEY }}" },
+            { "name": "Authorization", "value": "=Bearer {{ $env.SUPABASE_SERVICE_KEY }}" },
+            { "name": "Content-Type", "value": "application/json" }
+          ]
+        },
+        "sendBody": true,
+        "contentType": "json",
+        "body": "={{ JSON.stringify({ tentacule: 'CONCIERGE_SEED_FIRST_PROSPECT', event: 'seed_inserted', payload: { driver_id: $('Pour chaque driver').item.json.driver_id, prospect_id: $json[0]?.id, source: $json[0]?.meta?.seed_source }, created_at: new Date().toISOString() }) }}"
+      }
+    }
+  ],
+  "connections": {
+    "Cron 15min": {
+      "main": [[{ "node": "Drivers activés sans prospect (24h)", "type": "main", "index": 0 }]]
+    },
+    "Drivers activés sans prospect (24h)": {
+      "main": [[{ "node": "Pour chaque driver", "type": "main", "index": 0 }]]
+    },
+    "Pour chaque driver": {
+      "main": [
+        [
+          { "node": "Apify Google Maps (3km)", "type": "main", "index": 0 },
+          { "node": "Fallback hunter log proche", "type": "main", "index": 0 }
+        ]
+      ]
+    },
+    "Apify Google Maps (3km)": {
+      "main": [[{ "node": "Build prospect payload", "type": "main", "index": 0 }]]
+    },
+    "Fallback hunter log proche": {
+      "main": [[{ "node": "Build prospect payload", "type": "main", "index": 0 }]]
+    },
+    "Build prospect payload": {
+      "main": [[{ "node": "INSERT pieuvre_b2b_hunter_log", "type": "main", "index": 0 }]]
+    },
+    "INSERT pieuvre_b2b_hunter_log": {
+      "main": [[{ "node": "Push Ajnaya t'a trouvé ton 1er client", "type": "main", "index": 0 }]]
+    },
+    "Push Ajnaya t'a trouvé ton 1er client": {
+      "main": [[{ "node": "Log seed event", "type": "main", "index": 0 }]]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "saveManualExecutions": true,
+    "callerPolicy": "workflowsFromSameOwner"
+  },
+  "staticData": null
+}
