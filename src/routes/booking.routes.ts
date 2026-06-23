@@ -212,7 +212,10 @@ router.post('/', async (req: Request, res: Response) => {
   const dropoff_lng = b.dropoff_lng ?? b.dropoffLng ?? 0;
   const estimated_distance_km = b.estimated_distance_km ?? b.estimatedDistanceKm ?? 0;
   const estimated_duration_min = b.estimated_duration_min ?? b.estimatedDurationMin ?? 0;
-  const estimated_price = b.estimated_price ?? b.estimatedPrice ?? 0;
+  // ⚠️ client_proposed_price : valeur envoyée par le widget/client. NE PAS l'insérer
+  // tel quel dans la DB — recalcul server-side obligatoire (cf. fix 30/04 trou
+  // sécurité : un widget cassé ou malveillant pouvait envoyer estimated_price=1).
+  const client_proposed_price = b.estimated_price ?? b.estimatedPrice ?? 0;
   const scheduled_at = b.scheduled_at || b.scheduledAt;
 
   // Validation
@@ -237,10 +240,6 @@ router.post('/', async (req: Request, res: Response) => {
     });
   }
 
-  if (!estimated_price || estimated_price < 0) {
-    return res.status(400).json({ error: 'Prix estime invalide' });
-  }
-
   const scheduledDate = new Date(scheduled_at);
   if (isNaN(scheduledDate.getTime()) || scheduledDate.getTime() < Date.now() + 30 * 60 * 1000) {
     return res.status(400).json({ error: "Date invalide (minimum 30min a l'avance)" });
@@ -249,10 +248,10 @@ router.post('/', async (req: Request, res: Response) => {
   try {
     const supa = await getSupa();
 
-    // 1. Trouver le site et le chauffeur
+    // 1. Trouver le site, le chauffeur ET ses tarifs (pricing JSONB)
     const { data: site, error: siteErr } = await supa
       .from('driver_sites')
-      .select('id, driver_id, display_name')
+      .select('id, driver_id, display_name, pricing')
       .eq('slug', site_slug)
       .eq('is_active', true)
       .single();
@@ -261,7 +260,51 @@ router.post('/', async (req: Request, res: Response) => {
       return res.status(404).json({ error: 'Site chauffeur introuvable' });
     }
 
-    // 2. Creer la reservation
+    // 1.bis — RECALCUL SERVER-SIDE DU PRIX (sécurité — fix 30/04)
+    // Le client peut proposer un prix mais c'est UNIQUEMENT le tarif chauffeur
+    // qui fait foi. On normalise les 2 conventions JSONB observées en prod
+    // (camelCase {baseRate, perKmRate, ...} et snake_case {base_fare, per_km, ...}).
+    const pricing = (site.pricing as Record<string, any>) || {};
+    const baseFare = Number(pricing.base_fare ?? pricing.baseRate ?? pricing.base ?? 0);
+    const ratePerKm = Number(pricing.per_km ?? pricing.perKmRate ?? pricing.km_rate ?? 0);
+    const ratePerMin = Number(
+      pricing.per_minute ?? pricing.perMinuteRate ?? pricing.waitingRate ?? 0,
+    );
+    const minimumFare = Number(pricing.minimum ?? pricing.minimumFare ?? pricing.minimum_fare ?? 0);
+
+    const hasValidPricing = baseFare > 0 || ratePerKm > 0;
+    const calculated =
+      baseFare + estimated_distance_km * ratePerKm + estimated_duration_min * ratePerMin;
+    const serverPrice = hasValidPricing
+      ? Math.max(Math.round(calculated * 100) / 100, minimumFare)
+      : 0;
+
+    // Si le chauffeur n'a pas configuré ses tarifs → on REFUSE la réservation
+    // (mieux que d'accepter un prix bidon — incite le chauffeur à compléter)
+    if (!hasValidPricing) {
+      console.warn(
+        `[Booking] ❌ Tarifs absents pour ${site_slug} (driver=${site.driver_id}) — booking refusé`,
+      );
+      return res.status(409).json({
+        error:
+          "Tarifs du chauffeur non configurés. La réservation ne peut pas être créée tant que le chauffeur n'a pas défini ses tarifs.",
+        code: 'driver_pricing_missing',
+      });
+    }
+
+    // Si le client proposait un prix très différent (>10% écart) → on logge
+    // l'incident pour audit (potentiel bug widget ou tentative de fraude).
+    const priceMismatch =
+      client_proposed_price > 0 ? Math.abs(client_proposed_price - serverPrice) / serverPrice : 0;
+    if (priceMismatch > 0.1) {
+      console.warn(
+        `[Booking] ⚠️ Prix client (${client_proposed_price}€) ≠ prix server (${serverPrice}€) — écart ${(priceMismatch * 100).toFixed(0)}% — site=${site_slug}`,
+      );
+    }
+
+    const estimated_price = serverPrice; // ✅ source de vérité = tarifs chauffeur
+
+    // 2. Creer la reservation avec le prix RECALCULÉ
     const { data: booking, error: bookingErr } = await supa
       .from('bookings')
       .insert({

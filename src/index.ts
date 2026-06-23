@@ -15,8 +15,17 @@ import cors from 'cors';
 // ── Driver Site Template (v3.0) ──
 import { renderDriverPage as renderDriverPageV3 } from './driverSiteTemplate.js';
 
+// ── v1.10.59 — Geo cache grille 5km pour /api/context/* (anti-surfacturation) ──
+import { geoCache } from './lib/geoCache.js';
+
 // ── Real Supabase + Email imports for Stripe webhooks ──
-import { upsertUserByEmail, setSubscriptionStatus, logEvent } from './services/supa.js';
+import {
+  upsertUserByEmail,
+  setSubscriptionStatus,
+  logEvent,
+  setTierFromStripeEvent,
+  downgradeUserToFree,
+} from './services/supa.js';
 import {
   sendSubscriptionActivated,
   sendPaymentSucceeded,
@@ -382,13 +391,17 @@ app.post('/api/webhooks/stripe', express.raw({ type: 'application/json' }), asyn
       if (session.customer_email) {
         const user = await upsertUserByEmail(session.customer_email);
         const planName = session.metadata?.plan_name || 'FOREAS Pro';
+        const sessionPriceId = session.metadata?.price_id || null;
         await setSubscriptionStatus({
           userId: user.id,
           provider: 'stripe',
           status: 'active',
           currentPeriodEnd: null,
-          productId: session.metadata?.price_id || null,
+          productId: sessionPriceId,
         });
+        // Phase B 10/05 — set user_profiles.tier selon priceId (Pro/Elite)
+        // Si STRIPE_PRICE_ID_* env vars pas encore set → no-op gracieux.
+        await setTierFromStripeEvent(session.customer_email, sessionPriceId, null);
         await logEvent(user.id, 'checkout.session.completed', session);
         await sendSubscriptionActivated(
           session.customer_email,
@@ -491,13 +504,16 @@ app.post('/api/webhooks/stripe', express.raw({ type: 'application/json' }), asyn
         const periodEnd = invoice.lines?.data?.[0]?.period?.end
           ? new Date(invoice.lines.data[0].period.end * 1000).toISOString()
           : null;
+        const invoicePriceId = invoice.lines?.data?.[0]?.price?.id || null;
         await setSubscriptionStatus({
           userId: user.id,
           provider: 'stripe',
           status: 'active',
           currentPeriodEnd: periodEnd,
-          productId: invoice.lines?.data?.[0]?.price?.id || null,
+          productId: invoicePriceId,
         });
+        // Phase B 10/05 — refresh tier + tier_active_until à chaque paiement réussi
+        await setTierFromStripeEvent(invoice.customer_email, invoicePriceId, periodEnd);
         await logEvent(user.id, 'invoice.payment_succeeded', invoice);
         const amountPaid = ((invoice.amount_paid || 0) / 100).toFixed(2) + ' €';
         const nextDate = periodEnd
@@ -532,7 +548,7 @@ app.post('/api/webhooks/stripe', express.raw({ type: 'application/json' }), asyn
             // 1) Incrémenter le compteur de paiements hebdomadaires consécutifs
             const newCounter = (driver.payments_counter ?? 0) + 1;
             const alreadyQualified = driver.qualified_for_referral ?? false;
-            const nowQualified = newCounter >= 4;
+            const nowQualified = newCounter >= 1; // Pricing V2 (09/06/2026) : qualification dès le 1er paiement
 
             await supaAdmin
               .from('drivers')
@@ -559,7 +575,7 @@ app.post('/api/webhooks/stripe', express.raw({ type: 'application/json' }), asyn
                 [];
               // N1 driver
               if (driver.referred_by) {
-                sponsors.push({ type: 'driver', id: driver.referred_by, level: 1, amount: 10 });
+                sponsors.push({ type: 'driver', id: driver.referred_by, level: 1, amount: 25 }); // Pricing V2
               }
               // N1 partner
               if (driver.referred_by_partner) {
@@ -567,7 +583,7 @@ app.post('/api/webhooks/stripe', express.raw({ type: 'application/json' }), asyn
                   type: 'partner',
                   id: driver.referred_by_partner,
                   level: 1,
-                  amount: 10,
+                  amount: 25, // Pricing V2
                 });
               }
               notifyPieuvreMlmEvent('mlm_filleul_qualified', {
@@ -663,13 +679,20 @@ app.post('/api/webhooks/stripe', express.raw({ type: 'application/json' }), asyn
         const periodEnd = subscription.current_period_end
           ? new Date(subscription.current_period_end * 1000).toISOString()
           : null;
+        const subPriceId = subscription.items?.data?.[0]?.price?.id || null;
         await setSubscriptionStatus({
           userId: user.id,
           provider: 'stripe',
           status: subscription.status === 'active' ? 'active' : subscription.status,
           currentPeriodEnd: periodEnd,
-          productId: subscription.items?.data?.[0]?.price?.id || null,
+          productId: subPriceId,
         });
+        // Phase B 10/05 — sync tier sur change Pro↔Elite ou activation post-trial.
+        // Si subscription.status !== 'active' (paused/canceled), on garde le tier actuel
+        // (downgrade géré par customer.subscription.deleted uniquement).
+        if (subscription.status === 'active') {
+          await setTierFromStripeEvent(customerEmail, subPriceId, periodEnd);
+        }
         await logEvent(user.id, 'customer.subscription.updated', subscription);
         if (
           previousAttributes.status &&
@@ -709,6 +732,10 @@ app.post('/api/webhooks/stripe', express.raw({ type: 'application/json' }), asyn
           status: 'canceled',
           currentPeriodEnd: null,
         });
+        // Phase B 10/05 — downgrade user_profiles.tier à 'free' au churn complet.
+        // Note : si Stripe a un grace period, current_period_end est dans le futur
+        // et l'event subscription.deleted arrive uniquement à la fin → safe de set 'free'.
+        await downgradeUserToFree(customerEmail);
         await logEvent(user.id, 'customer.subscription.deleted', subscription);
         await sendSubscriptionCanceled(customerEmail, subscription.metadata?.name || 'Chauffeur');
 
@@ -741,7 +768,7 @@ app.post('/api/webhooks/stripe', express.raw({ type: 'application/json' }), asyn
                 id: driver.referred_by,
                 type: 'driver',
                 level: 1,
-                lost_monthly_amount: 10,
+                lost_monthly_amount: 25, // Pricing V2
               });
               // N2
               const { data: n1 } = await supaAdmin
@@ -754,7 +781,7 @@ app.post('/api/webhooks/stripe', express.raw({ type: 'application/json' }), asyn
                   id: n1.referred_by,
                   type: 'driver',
                   level: 2,
-                  lost_monthly_amount: 4,
+                  lost_monthly_amount: 8, // Pricing V2
                 });
                 // N3
                 const { data: n2 } = await supaAdmin
@@ -777,7 +804,7 @@ app.post('/api/webhooks/stripe', express.raw({ type: 'application/json' }), asyn
                 id: driver.referred_by_partner,
                 type: 'partner',
                 level: 1,
-                lost_monthly_amount: 10,
+                lost_monthly_amount: 25, // Pricing V2
               });
             }
 
@@ -861,6 +888,18 @@ async function loadAdminRoutes(): Promise<void> {
   try {
     const { adminRouter } = await import('./routes/admin.routes.js');
     app.use('/api/admin', adminRouter);
+
+    // Salle de commande Pieuvre (lecture admin, service_role) :
+    //   GET /api/admin/pieuvre-state
+    try {
+      const adminPieuvreStateRouter = (await import('./routes/adminPieuvreState.routes.js'))
+        .default;
+      app.use('/api/admin', adminPieuvreStateRouter);
+      console.log('[Admin] Pieuvre state route mounted at /api/admin/pieuvre-state');
+    } catch (psErr: any) {
+      console.error(`[Admin] Pieuvre state route failed to load: ${psErr.message}`);
+    }
+
     adminRoutesLoaded = true;
     console.log('[Admin] Routes mounted at /api/admin');
   } catch (err: any) {
@@ -1275,17 +1314,47 @@ async function loadVoiceRoutes() {
 }
 
 // ── Resend Webhooks ──
+// v1.10.62 (Ajnaya2026v118) — Fix B1 critique : `express.raw()` était inopérant
+// car `express.json()` global (ligne 815) consommait le stream avant. Pattern
+// correct : `express.json({ verify: cb })` qui expose buf via callback DURANT
+// le parse. Identique à loadFinderInboundRoutes (ligne 1357).
 let resendWebhooksLoaded = false;
 async function loadResendWebhooks(): Promise<void> {
   if (resendWebhooksLoaded) return;
   try {
     const rwRouter = (await import('./routes/resendWebhooks.js')).default;
-    // Raw body middleware pour HMAC verification
-    app.use('/api/webhooks/resend', express.raw({ type: 'application/json' }), rwRouter);
+    const jsonWithRaw = express.json({
+      limit: '2mb',
+      verify: (req, _res, buf) => {
+        (req as any).rawBody = Buffer.from(buf);
+      },
+    });
+    app.use('/api/webhooks/resend', jsonWithRaw, rwRouter);
     resendWebhooksLoaded = true;
-    console.log('[ResendWebhooks] Mounted at /api/webhooks/resend');
+    console.log('[ResendWebhooks] Mounted at /api/webhooks/resend (HMAC verify enforced)');
   } catch (err: any) {
     console.error(`[ResendWebhooks] Failed to load: ${err.message}`);
+  }
+}
+
+// ── WhatsApp Webhooks (Meta Cloud API) ──
+// v1.10.62 (Ajnaya2026v118) — Fix B1 critique : pattern correct verify cb.
+let whatsappWebhooksLoaded = false;
+async function loadWhatsappWebhooks(): Promise<void> {
+  if (whatsappWebhooksLoaded) return;
+  try {
+    const wwRouter = (await import('./routes/whatsappWebhooks.js')).default;
+    const jsonWithRaw = express.json({
+      limit: '2mb',
+      verify: (req, _res, buf) => {
+        (req as any).rawBody = Buffer.from(buf);
+      },
+    });
+    app.use('/api/webhooks/whatsapp', jsonWithRaw, wwRouter);
+    whatsappWebhooksLoaded = true;
+    console.log('[WhatsAppWebhooks] Mounted at /api/webhooks/whatsapp (HMAC verify enforced)');
+  } catch (err: any) {
+    console.error(`[WhatsAppWebhooks] Failed to load: ${err.message}`);
   }
 }
 
@@ -1377,6 +1446,7 @@ setTimeout(() => {
   loadVehicleRoutes();
   loadVoiceRoutes();
   loadResendWebhooks();
+  loadWhatsappWebhooks(); // v1.10.61 (Ajnaya2026v1) — Témoin Vivant
   loadOptoutRoutes();
   loadInternalCronRoutes();
   loadMlmRoutes();
@@ -1597,8 +1667,18 @@ app.post('/api/tts', express.json(), async (req: any, res: any) => {
 
 // ============================================
 // CONTEXT API — Ajnaya (OpenWeather + PredictHQ proxy sécurisé)
-// Les clés API ne quittent jamais le backend
+// Les clés API ne quittent jamais le backend.
+//
+// v1.10.59 — CACHE GRID-BASED (geoCache.ts) :
+//   Mutualise les appels APIs payantes entre tous les chauffeurs dans une
+//   même grille géographique (~5km via .toFixed(2) côté lat/lng).
+//   • PredictHQ events  : TTL 10 min  (économie majeure — payant à l'event)
+//   • OpenWeather       : TTL 15 min  (économie modérée — 1k free/jour)
+//   • TomTom traffic    : TTL  3 min  (frais rapide mais 50k free/jour)
+//   • SNCF/IDFM         : TTL  5 min  (gratuit, mais réduit load Railway)
+//   Header X-Cache: HIT|MISS|BYPASS pour debug/monitoring.
 // ============================================
+
 app.get('/api/context/weather', async (req: any, res: any) => {
   const { lat, lng } = req.query as { lat?: string; lng?: string };
   if (!lat || !lng) return res.status(400).json({ error: 'lat, lng required' });
@@ -1606,6 +1686,7 @@ app.get('/api/context/weather', async (req: any, res: any) => {
   const key = process.env.OPENWEATHER_API_KEY;
   if (!key) {
     console.warn('[Context] OPENWEATHER_API_KEY not set — returning neutral');
+    res.set('X-Cache', 'BYPASS');
     return res.json({
       weather: [{ main: 'Clear', description: 'clear sky' }],
       main: { temp: 15 },
@@ -1613,13 +1694,19 @@ app.get('/api/context/weather', async (req: any, res: any) => {
   }
 
   try {
-    const url = `https://api.openweathermap.org/data/2.5/weather?lat=${encodeURIComponent(lat)}&lon=${encodeURIComponent(lng)}&appid=${key}&units=metric&lang=fr`;
-    const resp = await fetch(url, { signal: AbortSignal.timeout(5000) });
-    if (!resp.ok) throw new Error(`OpenWeather ${resp.status}`);
-    const data = await resp.json();
+    const latNum = parseFloat(lat);
+    const lngNum = parseFloat(lng);
+    const { data, status } = await geoCache.getOrFetch('openweather', latNum, lngNum, async () => {
+      const url = `https://api.openweathermap.org/data/2.5/weather?lat=${encodeURIComponent(lat)}&lon=${encodeURIComponent(lng)}&appid=${key}&units=metric&lang=fr`;
+      const resp = await fetch(url, { signal: AbortSignal.timeout(5000) });
+      if (!resp.ok) throw new Error(`OpenWeather ${resp.status}`);
+      return await resp.json();
+    });
+    res.set('X-Cache', status);
     res.json(data);
   } catch (err: any) {
     console.error('[Context] Weather fetch error:', err.message);
+    res.set('X-Cache', 'MISS-FALLBACK');
     // Mode dégradé — contexte neutre plutôt qu'erreur 502
     res.json({
       weather: [{ main: 'Clear', description: 'unknown' }],
@@ -1635,23 +1722,36 @@ app.get('/api/context/events', async (req: any, res: any) => {
   const key = process.env.PREDICTHQ_API_KEY;
   if (!key) {
     console.warn('[Context] PREDICTHQ_API_KEY not set — returning empty events');
+    res.set('X-Cache', 'BYPASS');
     return res.json({ results: [], count: 0 });
   }
 
   try {
-    const url = `https://api.predicthq.com/v1/events/?within=10km@${encodeURIComponent(lat)},${encodeURIComponent(lng)}&active.gte=now&limit=20&sort=predicted_event_spend`;
-    const resp = await fetch(url, {
-      headers: {
-        Authorization: `Bearer ${key}`,
-        Accept: 'application/json',
+    const latNum = parseFloat(lat);
+    const lngNum = parseFloat(lng);
+    // ⚠️ PredictHQ payant — cache 10 min CRITIQUE pour éviter surfacturation.
+    const { data, status } = await geoCache.getOrFetch(
+      'predicthq_events',
+      latNum,
+      lngNum,
+      async () => {
+        const url = `https://api.predicthq.com/v1/events/?within=10km@${encodeURIComponent(lat)},${encodeURIComponent(lng)}&active.gte=now&limit=20&sort=predicted_event_spend`;
+        const resp = await fetch(url, {
+          headers: {
+            Authorization: `Bearer ${key}`,
+            Accept: 'application/json',
+          },
+          signal: AbortSignal.timeout(6000),
+        });
+        if (!resp.ok) throw new Error(`PredictHQ ${resp.status}`);
+        return await resp.json();
       },
-      signal: AbortSignal.timeout(6000),
-    });
-    if (!resp.ok) throw new Error(`PredictHQ ${resp.status}`);
-    const data = await resp.json();
+    );
+    res.set('X-Cache', status);
     res.json(data);
   } catch (err: any) {
     console.error('[Context] Events fetch error:', err.message);
+    res.set('X-Cache', 'MISS-FALLBACK');
     res.json({ results: [], count: 0 });
   }
 });
@@ -1664,60 +1764,67 @@ app.get('/api/context/events', async (req: any, res: any) => {
 /**
  * GET /api/context/transport-disruptions?lat=&lng=&radius=
  * Perturbations SNCF/RATP/aéroports = pic VTC immédiat dans la zone.
- * Pour l'instant : reuse AjnayaFusionEngine si présent (SNCF, IDFM déjà câblés)
- * sinon retourne tableau vide. Toujours JSON valide.
+ * SNCF/IDFM = APIs gratuites mais cache 5 min pour réduire load Railway.
  */
-app.get('/api/context/transport-disruptions', async (req: any, res: any) => {
-  const { lat, lng, radius } = req.query as { lat?: string; lng?: string; radius?: string };
-  if (!lat || !lng) return res.status(400).json({ error: 'lat, lng required' });
-
+app.get('/api/context/transport-disruptions', async (_req: any, res: any) => {
+  // lat/lng optionnels — les perturbations IDFM sont nationales, pas géo-dépendantes
   try {
-    // Tentative : passer par AjnayaFusionEngine si disponible (a déjà SNCF/IDFM)
-    const fusionMod = await import('./services/AjnayaFusionEngine.js').catch(() => null as any);
-    if (fusionMod?.fuse) {
-      const result = await fusionMod
-        .fuse({
-          userLat: parseFloat(lat),
-          userLng: parseFloat(lng),
-          radiusKm: radius ? parseFloat(radius) : 10,
-        })
-        .catch(() => null);
-      const disruptions = result?.disruptions ?? result?.transportDisruptions ?? [];
-      return res.json({ disruptions });
-    }
-    return res.json({ disruptions: [] });
+    const { getStructuredDisruptions } = await import('./services/realtimeAdapters/IDFMAdapter.js');
+    const disruptions = await getStructuredDisruptions();
+    res.json({ disruptions, source: 'idfm', fetched_at: new Date().toISOString() });
   } catch (err: any) {
     console.warn('[Context] transport-disruptions error:', err?.message);
-    res.json({ disruptions: [] });
+    res.json({ disruptions: [], source: 'fallback', fetched_at: new Date().toISOString() });
   }
 });
 
 /**
  * GET /api/context/traffic-incidents?lat=&lng=&radius=
- * Bouchons / accidents / fermetures voie. Source : TomTom/Waze déjà câblés.
+ * Bouchons / accidents / fermetures voie. Source : TomTom (50k/jour gratuit puis payant).
+ * TTL 3 min (changements rapides — il faut rester pertinent).
  */
 app.get('/api/context/traffic-incidents', async (req: any, res: any) => {
   const { lat, lng, radius } = req.query as { lat?: string; lng?: string; radius?: string };
   if (!lat || !lng) return res.status(400).json({ error: 'lat, lng required' });
 
   try {
-    const fusionMod = await import('./services/AjnayaFusionEngine.js').catch(() => null as any);
-    if (fusionMod?.fuse) {
-      const result = await fusionMod
-        .fuse({
-          userLat: parseFloat(lat),
-          userLng: parseFloat(lng),
-          radiusKm: radius ? parseFloat(radius) : 10,
-        })
-        .catch(() => null);
-      const incidents = result?.trafficIncidents ?? result?.incidents ?? [];
-      return res.json({ incidents });
-    }
-    return res.json({ incidents: [] });
+    const latNum = parseFloat(lat);
+    const lngNum = parseFloat(lng);
+    const { data, status } = await geoCache.getOrFetch(
+      'tomtom_traffic',
+      latNum,
+      lngNum,
+      async () => {
+        const fusionMod = await import('./services/AjnayaFusionEngine.js').catch(() => null as any);
+        if (fusionMod?.fuse) {
+          const result = await fusionMod
+            .fuse({
+              userLat: latNum,
+              userLng: lngNum,
+              radiusKm: radius ? parseFloat(radius) : 10,
+            })
+            .catch(() => null);
+          const incidents = result?.trafficIncidents ?? result?.incidents ?? [];
+          return { incidents };
+        }
+        return { incidents: [] };
+      },
+    );
+    res.set('X-Cache', status);
+    res.json(data);
   } catch (err: any) {
     console.warn('[Context] traffic-incidents error:', err?.message);
+    res.set('X-Cache', 'MISS-FALLBACK');
     res.json({ incidents: [] });
   }
+});
+
+/**
+ * GET /api/context/cache-stats — Monitoring du cache geoCache (admin/debug).
+ * Retourne nb d'entries, hits cumulés, age de la plus ancienne entry.
+ */
+app.get('/api/context/cache-stats', (_req: any, res: any) => {
+  res.json(geoCache.getStats());
 });
 
 /**

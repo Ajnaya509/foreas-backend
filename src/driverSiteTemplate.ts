@@ -395,6 +395,8 @@ function renderTestimonialCard(
     </div>`;
 }
 
+import { renderConciergeWidget } from './conciergeWidget.js';
+
 // ─── Main Template ─────────────────────────────────────────────────────────
 
 export function renderDriverPage(
@@ -2454,6 +2456,14 @@ function saveBooking(email, phone, paymentIntentId) {
   document.querySelectorAll('.reveal').forEach(function(el) { obs.observe(el); });
 })();
 </script>
+
+${renderConciergeWidget({
+  driverSlug: site.slug,
+  driverName: site.display_name || firstName,
+  apiBaseUrl: backendUrl,
+  primaryColor: themeColor,
+  accentColor: '#00D4FF',
+})}
 </body>
 </html>`;
 }

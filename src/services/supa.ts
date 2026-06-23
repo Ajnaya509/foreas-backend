@@ -139,6 +139,138 @@ export async function setSubscriptionStatus(data: {
   console.log(`[Supa] Subscription ${data.status} for user ${data.userId}`);
 }
 
+// =============================================================================
+// Phase B fil App 10/05/2026 — Tier upsert post-checkout Stripe
+// =============================================================================
+// Spec : PRICING_FEATURES_MASTER.md §1 (Free / Pro 19,97 / Elite 44,97)
+// Source : entrée AJNAYA_CHANGELOG.md [2026-05-10 18:30] FIL SITE §5 :
+//   "Webhook Stripe post-checkout (qui set tier) à câbler côté fil App
+//    backend Railway. Pattern attendu : UPDATE user_profiles SET tier='pro'/'elite'
+//    WHERE user_id = (SELECT user_id FROM auth.users WHERE email = stripe_customer.email)"
+//
+// Mapping Stripe priceId → tier via env vars Railway :
+//   - STRIPE_PRICE_ID_PRO_WEEKLY    → 'pro'  (19,97 €/sem)
+//   - STRIPE_PRICE_ID_PRO_ANNUAL    → 'pro'  (830,75 €/an)
+//   - STRIPE_PRICE_ID_ELITE_WEEKLY  → 'elite' (44,97 €/sem)
+//   - STRIPE_PRICE_ID_ELITE_ANNUAL  → 'elite' (1 870,75 €/an)
+//
+// Si les env vars ne sont pas encore set (Chandler n'a pas exécuté
+// `bash scripts/stripe-phase-a.sh`), le helper logge un warning et skip
+// le set tier sans crasher le webhook (gracefully degraded).
+// =============================================================================
+
+export type UserTier = 'free' | 'pro' | 'elite';
+
+/**
+ * Mappe un Stripe priceId vers un tier en consultant les env vars Railway.
+ * Retourne `null` si le priceId ne match aucun env var connu (skip silencieux).
+ */
+export function getTierFromPriceId(priceId: string | null | undefined): UserTier | null {
+  if (!priceId) return null;
+  const proWeekly = process.env.STRIPE_PRICE_ID_PRO_WEEKLY;
+  const proAnnual = process.env.STRIPE_PRICE_ID_PRO_ANNUAL;
+  const eliteWeekly = process.env.STRIPE_PRICE_ID_ELITE_WEEKLY;
+  const eliteAnnual = process.env.STRIPE_PRICE_ID_ELITE_ANNUAL;
+
+  if (priceId === proWeekly || priceId === proAnnual) return 'pro';
+  if (priceId === eliteWeekly || priceId === eliteAnnual) return 'elite';
+
+  // Pricing legacy (pre-Phase A 10/05) — reconnu pour rétrocompat audit
+  // mais on ne migre pas automatiquement : ces customers restent sur leur ancien plan.
+  if (!proWeekly && !proAnnual && !eliteWeekly && !eliteAnnual) {
+    console.warn(
+      '[Supa] getTierFromPriceId: STRIPE_PRICE_ID_* env vars not set — Phase A script not yet executed by Chandler. Returning null (tier set skipped).',
+    );
+  }
+  return null;
+}
+
+/**
+ * UPSERT le tier d'un user dans `user_profiles` (clé `user_id`).
+ * - Si row existe → UPDATE tier + tier_active_until
+ * - Si row n'existe pas → INSERT minimal (user_id + tier + tier_active_until)
+ *
+ * Utilise UNIQUE constraint `user_profiles_user_id_unique` (migration appliquée 10/05 19:15).
+ *
+ * @param userId UUID identique à auth.users.id (récupéré via upsertUserByEmail)
+ * @param tier 'free' | 'pro' | 'elite'
+ * @param tierActiveUntil ISO timestamp ou null (null = pas d'expiration suivie)
+ */
+export async function setUserTier(
+  userId: string,
+  tier: UserTier,
+  tierActiveUntil: string | null = null,
+): Promise<void> {
+  try {
+    const { error } = await supaSrv.from('user_profiles').upsert(
+      {
+        user_id: userId,
+        tier,
+        tier_active_until: tierActiveUntil,
+        updated_at: new Date().toISOString(),
+      },
+      { onConflict: 'user_id' },
+    );
+
+    if (error) {
+      console.error('[Supa] setUserTier error:', error.message);
+      throw error;
+    }
+
+    console.log(
+      `[Supa] tier=${tier} set for user ${userId}${tierActiveUntil ? ` until ${tierActiveUntil}` : ''}`,
+    );
+  } catch (err: any) {
+    console.error('[Supa] setUserTier exception:', err?.message || err);
+    // Non-blocking : on ne bloque pas le webhook Stripe pour ce sub-step
+    // (le subscription est déjà set, le tier sera re-tenté au prochain event ou via cron de reconciliation)
+  }
+}
+
+/**
+ * Helper combiné : depuis un email + priceId Stripe, met à jour
+ * `user_profiles.tier` automatiquement. Idempotent + safe (no-throw).
+ *
+ * Appelé par tous les events Stripe pertinents (checkout.session.completed,
+ * invoice.payment_succeeded, customer.subscription.updated).
+ *
+ * @param email Email Stripe customer (pour résoudre user_id via getUserIdByEmail)
+ * @param priceId Stripe priceId actif sur la subscription
+ * @param periodEnd ISO timestamp `current_period_end` ou null
+ */
+export async function setTierFromStripeEvent(
+  email: string,
+  priceId: string | null | undefined,
+  periodEnd: string | null = null,
+): Promise<void> {
+  const tier = getTierFromPriceId(priceId);
+  if (!tier) {
+    console.log(`[Supa] setTierFromStripeEvent: priceId=${priceId} not mapped to a tier → skip`);
+    return;
+  }
+  try {
+    const userId = await getUserIdByEmail(email);
+    await setUserTier(userId, tier, periodEnd);
+  } catch (err: any) {
+    console.error('[Supa] setTierFromStripeEvent failed:', err?.message || err);
+    // Non-blocking
+  }
+}
+
+/**
+ * Downgrade un user à 'free' (utilisé par customer.subscription.deleted).
+ * Reset tier_active_until à null pour cohérence avec frontend useTier
+ * (qui lit tier_active_until pour détection expiration).
+ */
+export async function downgradeUserToFree(email: string): Promise<void> {
+  try {
+    const userId = await getUserIdByEmail(email);
+    await setUserTier(userId, 'free', null);
+  } catch (err: any) {
+    console.error('[Supa] downgradeUserToFree failed:', err?.message || err);
+  }
+}
+
 export async function logEvent(userId: string | null, type: string, payload: any): Promise<void> {
   try {
     const { error } = await supaSrv.from('event_log').insert({

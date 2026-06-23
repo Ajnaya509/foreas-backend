@@ -661,7 +661,7 @@ Catégories OK (score 60-100) :
 PROTÈGE FOREAS AVANT TOUT mais reste permissif sur la photo "honnête de chauffeur".`;
 
     const message = await client.messages.create({
-      model: 'claude-haiku-4-5',
+      model: 'claude-sonnet-4-6',
       max_tokens: 400,
       system: systemPrompt,
       messages: [

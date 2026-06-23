@@ -17,8 +17,177 @@ import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
 import { AJNAYA_BASE_SYSTEM_PROMPT, buildAjnayaSystemPrompt } from '../constants/ajnayaPersonality';
+import {
+  callPieuvreBrain,
+  isPieuvreBrainEnabled,
+  lastPieuvreCallStatus,
+  type PieuvreCanal,
+  type PieuvreTentacle,
+} from '../lib/pieuvre-client';
+import { getSupabase } from '../lib/supabase';
+
+// ═══════════════════════════════════════════════════════════════
+// 🎙️ AUDIO TAGS — strip helper (défense en profondeur)
+// ═══════════════════════════════════════════════════════════════
+// Les LLM (Sonnet/Opus) injectent des audio tags v3 pour ElevenLabs :
+//   "[confident] T1 dans 6 min" → ElevenLabs v3 → ton plus assertif
+// Le mot "[confident]" ne doit PAS apparaître dans la chat bubble.
+// N8N strip déjà côté Pieuvre Brain. Mais le path fallback LangGraph
+// bypasse N8N → on strip aussi ICI au cas où.
+const AUDIO_TAG_REGEX =
+  /\[(?:laughs softly|laughs|sighs|hmm|mmh|confident|firmly|matter of fact|matter-of-fact|energetic|warmly|whispers|excited|happy|sad|angry|calmly|softly|happily|sadly|angrily|surprised|curious|thoughtful|enthusiastic|sympathetic)\]\s*/gi;
+
+/** Retourne {clean, withTags}: clean pour chat display, withTags pour TTS */
+function splitAudioTags(text: string | null | undefined): { clean: string; withTags: string } {
+  if (typeof text !== 'string') return { clean: '', withTags: '' };
+  const clean = text
+    .replace(AUDIO_TAG_REGEX, '')
+    .replace(/\s{2,}/g, ' ')
+    .trim();
+  return { clean, withTags: text };
+}
+
+// ============= LIVE CONTEXT BUILDER =============
+// Charge le profil chauffeur + stats récentes depuis Supabase pour
+// enrichir le contexte envoyé à Pieuvre Brain. Évite que le LLM
+// demande "tu tournes où ?" alors qu'on a la donnée.
+
+type DriverContext = {
+  first_name?: string;
+  full_name?: string;
+  email?: string;
+  phone?: string;
+  total_rides?: number;
+  total_earnings?: number;
+  earnings_today?: number;
+  rating?: number;
+  plan?: string;
+  has_active_sub?: boolean;
+  days_since_signup?: number;
+  referrals_count?: number;
+  is_online?: boolean;
+  last_active_minutes_ago?: number | null;
+  last_known_lat?: number | null;
+  last_known_lon?: number | null;
+};
+
+async function fetchDriverContext(identityId: string | null): Promise<DriverContext | null> {
+  if (!identityId) return null;
+  // 🛡️ Timeout strict 2s — fetchDriverContext ne doit JAMAIS bloquer le chat.
+  // Si Supabase rame, on retourne null et on continue en aveugle.
+  const TIMEOUT_MS = 2000;
+  const timeoutPromise = new Promise<null>((resolve) =>
+    setTimeout(() => resolve(null), TIMEOUT_MS),
+  );
+  const fetchPromise = (async (): Promise<DriverContext | null> => {
+    try {
+      const supa = getSupabase();
+      const { data: driver, error } = await supa
+        .from('drivers')
+        .select(
+          'first_name, last_name, name, email, phone, total_rides, total_earnings, earnings_today, average_rating, subscription_status, subscription_active, created_at, total_direct_referrals, is_online, last_active, last_lat, last_lon',
+        )
+        .eq('auth_user_id', identityId)
+        .maybeSingle();
+
+      if (error || !driver) {
+        const { data: driverById } = await supa
+          .from('drivers')
+          .select(
+            'first_name, last_name, name, email, phone, total_rides, total_earnings, earnings_today, average_rating, subscription_status, subscription_active, created_at, total_direct_referrals, is_online, last_active, last_lat, last_lon',
+          )
+          .eq('id', identityId)
+          .maybeSingle();
+        if (!driverById) return null;
+        return buildDriverCtx(driverById);
+      }
+      return buildDriverCtx(driver);
+    } catch (err: any) {
+      console.warn('[ajnaya] fetchDriverContext erreur:', err?.message);
+      return null;
+    }
+  })();
+  const result = await Promise.race([fetchPromise, timeoutPromise]);
+  if (result === null && identityId) {
+    // Optionnel : log si timeout (pour debug)
+    // console.warn('[ajnaya] fetchDriverContext timeout/null pour identity:', identityId);
+  }
+  return result;
+}
+
+function buildDriverCtx(driver: any): DriverContext {
+  const daysSinceSignup = driver.created_at
+    ? Math.floor((Date.now() - new Date(driver.created_at).getTime()) / 86400000)
+    : undefined;
+  const lastActiveMinutesAgo = driver.last_active
+    ? Math.floor((Date.now() - new Date(driver.last_active).getTime()) / 60000)
+    : null;
+  return {
+    first_name: driver.first_name || undefined,
+    full_name:
+      driver.name ||
+      (driver.first_name && driver.last_name
+        ? `${driver.first_name} ${driver.last_name}`
+        : undefined),
+    email: driver.email || undefined,
+    phone: driver.phone || undefined,
+    total_rides: driver.total_rides || 0,
+    total_earnings: Number(driver.total_earnings) || 0,
+    earnings_today: Number(driver.earnings_today) || 0,
+    rating: Number(driver.average_rating) || undefined,
+    plan: driver.subscription_status || 'none',
+    has_active_sub: !!driver.subscription_active,
+    days_since_signup: daysSinceSignup,
+    referrals_count: driver.total_direct_referrals || 0,
+    is_online: !!driver.is_online,
+    last_active_minutes_ago: lastActiveMinutesAgo,
+    last_known_lat: driver.last_lat ?? null,
+    last_known_lon: driver.last_lon ?? null,
+  };
+}
 
 const router = Router();
+
+// ═══════════════════════════════════════════════════════════════
+// 🔍 DEBUG ENDPOINT — diagnose Pieuvre Brain wiring
+// GET /api/ajnaya/pieuvre-health
+// Renvoie l'état des env vars + résultat dernier call à Pieuvre
+// ═══════════════════════════════════════════════════════════════
+router.get('/pieuvre-health', (_req, res) => {
+  res.json({
+    pieuvre_brain_enabled: isPieuvreBrainEnabled(),
+    env: {
+      PIEUVRE_RESPOND_URL_present: !!process.env.PIEUVRE_RESPOND_URL,
+      PIEUVRE_RESPOND_SECRET_present: !!process.env.PIEUVRE_RESPOND_SECRET,
+      PIEUVRE_RESPOND_TIMEOUT_MS: process.env.PIEUVRE_RESPOND_TIMEOUT_MS || '(default 10000)',
+      USE_LANGGRAPH: process.env.USE_LANGGRAPH || '(unset)',
+    },
+    last_pieuvre_call: { ...lastPieuvreCallStatus },
+    server_time: new Date().toISOString(),
+  });
+});
+
+// ============= VTC FR — TRANSCRIPTION PROMPT BIASING =============
+// Dictionnaire envoyé à gpt-4o-transcribe pour biaiser la transcription vers
+// le vocabulaire chauffeur VTC France. Réduit drastiquement les hallucinations
+// type "Aulnay-sous-Bois → Nesuboa" ou "T2C → Tessé".
+// Ordre : zones IDF prioritaires → autres villes → aéroports/terminaux →
+// gares → plateformes → jargon métier → formules courantes.
+const VTC_FR_TRANSCRIBE_PROMPT = `Conversation chauffeur VTC en France avec Ajnaya.
+
+Lieux Île-de-France : Paris, La Défense, Bercy, Opéra, République, Bastille, Châtelet, Pigalle, Belleville, Marais, Trocadéro, Saint-Germain, Champs-Élysées, Place d'Italie, Beaugrenelle, Porte Maillot, Porte de la Chapelle, Porte d'Italie, Boulogne-Billancourt, Neuilly-sur-Seine, Levallois-Perret, Issy-les-Moulineaux, Vincennes, Montreuil, Saint-Denis, Aubervilliers, Aulnay-sous-Bois, Bobigny, Drancy, Le Bourget, Le Blanc-Mesnil, Sevran, Tremblay-en-France, Roissy-en-France, Massy, Orly, Rungis, Créteil, Vitry-sur-Seine, Ivry, Nanterre, Versailles, Saint-Cloud, Suresnes, Meudon, Clichy.
+
+Aéroports/terminaux : Aéroport CDG (Charles-de-Gaulle), Aéroport Orly, Aéroport Le Bourget, Terminal 1, Terminal 2A, Terminal 2B, Terminal 2C, Terminal 2D, Terminal 2E, Terminal 2F, Terminal 2G, Terminal 3, Orly Sud, Orly Ouest, T1, T2A, T2B, T2C, T2D, T2E, T2F, T2G.
+
+Gares : Gare du Nord, Gare de Lyon, Gare de l'Est, Gare Saint-Lazare, Gare Montparnasse, Gare d'Austerlitz, Gare de Bercy, Gare Magenta, Gare Châtelet-Les-Halles.
+
+Autres villes : Lyon Part-Dieu, Bellecour, Aéroport Saint-Exupéry, Marseille Saint-Charles, Vieux-Port, Bordeaux Saint-Jean, Mériadeck, Lille Europe, Lille Flandres, Toulouse Matabiau, Capitole, Nice Côte d'Azur, Promenade des Anglais, Nantes, Strasbourg, Cannes, Rennes, Montpellier.
+
+Plateformes VTC : Uber, Bolt, Heetch, FreeNow, LeCab, Marcel, Allocab, G7, Yango.
+
+Jargon métier : course, vacation, surge, acceptance, pool, file, pic, no-show, créneau, tarif horaire, net, brut, course aéroport, retour à vide, kilométrage, base fare, tip, pourboire, rating, étoile, Diamond, Gold, Platinum, Silver, Quest, boost, multiplier, requalification, dépose-minute, hub.
+
+Formules courantes : "Salut Ajnaya", "j'ai fait", "j'en ai marre", "où je peux gagner", "tarif horaire", "ça vaut le coup", "je tourne sur", "tu peux me dire", "demain matin", "ce soir", "vendredi soir", "weekend", "pic du matin", "pic du soir".`;
 
 // Configuration depuis les variables d'environnement
 const CONFIG = {
@@ -28,6 +197,61 @@ const CONFIG = {
   ELEVENLABS_VOICE_ID: process.env.ELEVENLABS_VOICE_ID || 'MNKK2Wl2wbbsEPQTHZGt', // Koraly — Credible Pro Parisian (voix officielle Ajnaya, validée A/B test v3.6)
   MISTRAL_API_KEY: process.env.MISTRAL_API_KEY || '',
 };
+
+// ============================================
+// 📊 GET /api/ajnaya/elevenlabs-quota
+// v1.10.60 — Vérification factuelle du quota ElevenLabs.
+// Retourne tier, used, limit, remaining, next_reset_unix.
+// Permet de savoir si "Ajnaya ne parle plus" = vraiment crédits cramés
+// ou bien autre cause (timeout Pieuvre, network, etc.).
+// ============================================
+router.get('/elevenlabs-quota', async (_req: Request, res: Response) => {
+  if (!CONFIG.ELEVENLABS_API_KEY) {
+    return res.json({
+      ok: false,
+      reason: 'no_key',
+      message: 'ELEVENLABS_API_KEY non configurée côté Railway',
+    });
+  }
+  try {
+    const r = await fetch('https://api.elevenlabs.io/v1/user', {
+      headers: { 'xi-api-key': CONFIG.ELEVENLABS_API_KEY },
+      signal: AbortSignal.timeout(5000),
+    });
+    if (!r.ok) {
+      return res.json({
+        ok: false,
+        reason: r.status === 401 ? 'auth_invalid' : r.status === 429 ? 'rate_limit' : 'http_error',
+        http_status: r.status,
+      });
+    }
+    const j: any = await r.json();
+    const s = j?.subscription || {};
+    const used = s.character_count ?? 0;
+    const limit = s.character_limit ?? 0;
+    const remaining = Math.max(0, limit - used);
+    const usedPct = limit > 0 ? Math.round((used / limit) * 100) : 0;
+    const nextResetUnix = s.next_character_count_reset_unix;
+    const nextResetIso = nextResetUnix ? new Date(nextResetUnix * 1000).toISOString() : null;
+    return res.json({
+      ok: true,
+      tier: s.tier,
+      used,
+      limit,
+      remaining,
+      used_percent: usedPct,
+      can_extend: !!s.can_extend_character_limit,
+      voice_limit: s.voice_limit,
+      voice_count: s.voice_count,
+      next_reset_unix: nextResetUnix,
+      next_reset_iso: nextResetIso,
+      // Helper signaling : si remaining < 1000 chars, voix bientôt cassée
+      warning: remaining < 1000 ? 'low_credits' : remaining < 5000 ? 'getting_low' : null,
+    });
+  } catch (e: any) {
+    return res.json({ ok: false, reason: 'fetch_error', error: e?.message ?? 'unknown' });
+  }
+});
 
 // Client Anthropic pour ElevenLabs custom LLM
 let anthropic: Anthropic | null = null;
@@ -57,11 +281,8 @@ router.post('/llm', async (req: Request, res: Response) => {
     const systemPrompt = systemMessages.map((m: any) => m.content).join('\n\n');
 
     // Choisir le modèle Anthropic
-    const claudeModel = model.includes('opus')
-      ? 'claude-opus-4-5'
-      : model.includes('haiku')
-        ? 'claude-haiku-3-5'
-        : 'claude-sonnet-4-5';
+    // ⚠️ Plus de Haiku pour conv : tout fallback en Sonnet 4.6, Opus 4.7 sur opus
+    const claudeModel = model.includes('opus') ? 'claude-opus-4-7' : 'claude-sonnet-4-6';
 
     if (!anthropic) {
       // Fallback OpenAI si Anthropic non configuré
@@ -177,12 +398,15 @@ router.post('/transcribe', async (req: Request, res: Response) => {
     fs.writeFileSync(tempFilePath, audioBuffer);
 
     try {
-      // Appel Whisper
+      // Appel transcription premium — gpt-4o-transcribe (SOTA français 2025)
+      // Prompt biasing avec dictionnaire VTC FR : villes IDF + aéroports + plateformes + jargon
+      // → réduit drastiquement les hallucinations type "Aulnay-sous-Bois → Nesuboa"
       const transcription = await openai.audio.transcriptions.create({
         file: fs.createReadStream(tempFilePath),
-        model: 'whisper-1',
+        model: 'gpt-4o-transcribe',
         language: language,
-        prompt: 'Transcription pour assistant Ajnaya, chauffeur VTC Paris.',
+        prompt: VTC_FR_TRANSCRIBE_PROMPT,
+        temperature: 0,
       });
 
       // Nettoyer le fichier temporaire
@@ -243,6 +467,149 @@ router.post('/chat', async (req: Request, res: Response) => {
       });
     }
 
+    // ════════════════════════════════════════════════════════════════
+    // 🐙 PIEUVRE BRAIN MODE (priorité absolue si flag ON)
+    // ════════════════════════════════════════════════════════════════
+    // Conformément à AJNAYA_NORTH_STAR.md §2.9 — un canal NE PREND AUCUNE
+    // décision LLM autonome : tout passe par la Pieuvre. Le widget site
+    // a déjà migré (Site2026v40), c'est au tour de l'app (FIL APP §9 plan P0).
+    //
+    // Pattern : on essaie Pieuvre en premier, si elle retourne null
+    // (timeout/erreur) on tombe en fallback transparent sur LangGraph
+    // ou GPT-4o legacy (comportement actuel préservé).
+    if (isPieuvreBrainEnabled()) {
+      try {
+        // Détecter le tentacle approprié selon le canal :
+        //   - 'app_driver' = app mobile FOREAS (chauffeurs payants/trial)
+        //   - 'widget_site' = widget chatbox site (prospects)
+        //   - autres canaux : selon context.channel
+        const channel: string = context?.channel || 'app';
+        const tentacle: PieuvreTentacle =
+          channel === 'widget_site'
+            ? 'widget_site'
+            : channel === 'whatsapp'
+              ? 'whatsapp'
+              : 'app_driver';
+
+        const canal: PieuvreCanal =
+          channel === 'widget_site' ? 'web' : context?.platform === 'ios' ? 'ios' : 'android';
+
+        const sessionId =
+          context?.session_id ||
+          context?.sessionId ||
+          `app-${Date.now()}-${Math.random().toString(36).substring(2, 8)}`;
+
+        // 🌍 LIVE CONTEXT ENRICHMENT — charge profil chauffeur + stats Supabase
+        // Combine avec live_context.gps + live_context.time envoyés par l'app
+        const identityIdResolved = context?.identity_id || context?.identityId || null;
+        const driverCtx = await fetchDriverContext(identityIdResolved);
+        const liveContextFromApp = context?.live_context || context?.liveContext || {};
+        const liveContextEnriched = {
+          driver:
+            driverCtx ||
+            (context?.driverFirstName ? { first_name: context.driverFirstName } : null),
+          gps: liveContextFromApp.gps || null,
+          time: liveContextFromApp.time || null,
+          objective: context?.driverObjective || context?.driver_objective || null,
+        };
+        if (driverCtx) {
+          console.log(
+            `🐙 [AJNAYA] live_context: ${driverCtx.first_name || '?'} (J-${driverCtx.days_since_signup}, ${driverCtx.total_rides}c, plan=${driverCtx.plan}) GPS=${liveContextFromApp.gps ? 'on' : 'off'}`,
+          );
+        }
+
+        const pieuvreReply = await callPieuvreBrain({
+          tentacle,
+          canal,
+          identity_id: identityIdResolved,
+          session_id: sessionId,
+          message: {
+            role: 'user',
+            text: message.trim(),
+            type: 'text',
+          },
+          context: {
+            page_source: context?.page_source || `app://${channel}`,
+            heat_score: context?.heat_score,
+            history_last_10: (history || []).slice(-10),
+            // 🌍 LIVE CONTEXT — profil + GPS + heure (consommé par N8N Compose LLM Input)
+            live_context: liveContextEnriched,
+            // Aliases backward compat (existants — ne pas casser)
+            driver_first_name:
+              driverCtx?.first_name || context?.driverFirstName || context?.driver_first_name,
+            driver_objective: context?.driverObjective || context?.driver_objective,
+            zone: context?.zone,
+            location: context?.location || liveContextFromApp.gps?.place_name,
+            hour: liveContextFromApp.time?.hour ?? context?.hour,
+            day_of_week:
+              liveContextFromApp.time?.day_of_week || context?.dayOfWeek || context?.day_of_week,
+          },
+          meta: {
+            device: 'mobile',
+            user_agent: req.headers['user-agent'] || 'foreas-app',
+          },
+          client_version: 'app-v1.10.46',
+        });
+
+        if (pieuvreReply) {
+          // ✅ Pieuvre a répondu → on retourne au format compatible app
+          // (l'app pioche dans data.reply || data.content || data.text || data.response)
+          console.log(
+            `🐙 [AJNAYA] Pieuvre Brain (${Date.now() - startTime}ms) tentacle=${tentacle} model=${pieuvreReply.reply.llm_model}`,
+          );
+
+          // ⚠️ NE PAS renvoyer `reply` comme objet : l'app fait
+          // `data.reply || data.content || data.text || data.response`,
+          // un objet truthy casserait le parsing string. On renvoie l'objet
+          // détaillé sous `pieuvre_reply` et on garde les 3 alias string.
+          // 🎙️ Double strip défense en profondeur (au cas où N8N n'aurait pas stripé)
+          const pieuvreSplit = splitAudioTags(pieuvreReply.reply.text);
+          const cleanText = pieuvreSplit.clean;
+          // tts_text vient de N8N si dispo, sinon on reconstruit depuis le texte original
+          const ttsText = pieuvreReply.reply.tts_text || pieuvreSplit.withTags;
+
+          // 🎤 Auto-mic flag : si la réponse Ajnaya (CLEAN) finit par "?"
+          const replyTextTrim = cleanText.trim();
+          const expectsVoiceResponse =
+            replyTextTrim.endsWith('?') ||
+            replyTextTrim.endsWith('?»') ||
+            replyTextTrim.endsWith('?"');
+
+          return res.json({
+            success: true,
+            content: cleanText, // clean (display chat)
+            response: cleanText,
+            text: cleanText,
+            tts_text: ttsText, // avec tags pour TTS v3
+            pieuvre_reply: { ...pieuvreReply.reply, text: cleanText, tts_text: ttsText },
+            expects_voice_response: expectsVoiceResponse,
+            provider: 'pieuvre-brain',
+            // Signature unique branche Pieuvre (vue par l'app pour distinguer)
+            identityId: pieuvreReply.identity_id,
+            identity_id: pieuvreReply.identity_id,
+            intent_detected: pieuvreReply.intent_detected,
+            objection_detected: pieuvreReply.objection_detected,
+            sentiment: pieuvreReply.sentiment,
+            next_actions: pieuvreReply.next_actions,
+            should_capture_phone: pieuvreReply.should_capture_phone,
+            suggest_handoff: pieuvreReply.suggest_handoff,
+            // Compat fallback fields
+            sonar: false,
+            bolt: false,
+            fusion: null,
+            response_time_ms: Date.now() - startTime,
+            pieuvre_metadata: pieuvreReply.metadata,
+          });
+        }
+
+        // Si null → fall through au LangGraph / GPT-4o legacy ci-dessous
+        console.warn('🐙 [AJNAYA] Pieuvre null — fallback LangGraph/GPT-4o');
+      } catch (pieuvreErr: any) {
+        console.warn('🐙 [AJNAYA] Pieuvre erreur non catchée:', pieuvreErr?.message);
+        // Fall through au comportement legacy
+      }
+    }
+
     // ============================================
     // LANGGRAPH MODE — Claude Sonnet via graphe multi-agents
     // ============================================
@@ -263,13 +630,31 @@ router.post('/chat', async (req: Request, res: Response) => {
           `✅ [AJNAYA] LangGraph response (${Date.now() - startTime}ms) errors=${result.errors?.length || 0}`,
         );
 
+        // 🎙️ Strip audio tags du texte LangGraph (le LLM peut en avoir injecté
+        // car le system prompt v67 inclut AJNAYA_KORALY_V3_AUDIO_TAGS)
+        const lgSplit = splitAudioTags(result.response);
+        const lgClean = lgSplit.clean;
+        const lgWithTags = lgSplit.withTags;
+
+        // 🎤 Auto-mic flag : réponse termine par "?"
+        const lgTrim = lgClean.trim();
+        const lgExpectsVoice =
+          lgTrim.endsWith('?') || lgTrim.endsWith('?»') || lgTrim.endsWith('?"');
+
         // MEME FORMAT DE REPONSE que l'ancien pour ne rien casser
         return res.json({
           success: true,
-          content: result.response,
-          response: result.response,
-          text: result.response,
+          content: lgClean,
+          response: lgClean,
+          text: lgClean,
+          tts_text: lgWithTags, // avec tags pour TTS v3
+          expects_voice_response: lgExpectsVoice,
           provider: 'langgraph-claude',
+          // 🔍 Debug : pourquoi on est tombé en LangGraph
+          pieuvre_debug: {
+            enabled: isPieuvreBrainEnabled(),
+            last_call: { ...lastPieuvreCallStatus },
+          },
           sonar: false,
           bolt: false,
           fusion: null,
@@ -461,7 +846,7 @@ router.post('/synthesize', async (req: Request, res: Response) => {
   try {
     console.log('🔊 [AJNAYA] Synthèse vocale demandée');
 
-    const { text, emotion = 'neutral', speed: clientSpeed } = req.body;
+    const { text, emotion = 'neutral', speed: clientSpeed, context } = req.body;
 
     if (!text || typeof text !== 'string' || text.trim().length === 0) {
       return res.status(400).json({
@@ -471,9 +856,10 @@ router.post('/synthesize', async (req: Request, res: Response) => {
     }
 
     const cleanText = text.trim().substring(0, 1000); // Limite 1000 chars
-    // Speed: client peut override (1.0-1.5), sinon défaut 1.15
+    // Speed: client override (0.7-1.5) > context coach 1.15 > défaut 1.22
+    const defaultSpeed = context === 'coach_objective' ? 1.15 : 1.22;
     const ttsSpeed =
-      typeof clientSpeed === 'number' ? Math.min(Math.max(clientSpeed, 0.7), 1.5) : 1.2;
+      typeof clientSpeed === 'number' ? Math.min(Math.max(clientSpeed, 0.7), 1.5) : defaultSpeed;
 
     // Essayer ElevenLabs d'abord
     if (CONFIG.ELEVENLABS_API_KEY) {
@@ -491,7 +877,7 @@ router.post('/synthesize', async (req: Request, res: Response) => {
             },
             body: JSON.stringify({
               text: cleanText,
-              model_id: 'eleven_multilingual_v2',
+              model_id: 'eleven_v3',
               voice_settings: { ...getVoiceSettings(emotion), speed: ttsSpeed },
             }),
           },
@@ -519,10 +905,33 @@ router.post('/synthesize', async (req: Request, res: Response) => {
           });
         }
 
-        console.warn('⚠️ [AJNAYA] ElevenLabs échoué:', elevenLabsResponse.status);
+        // v1.10.60 — Distinguer les codes d'erreur pour diagnostic factuel.
+        // 401 = clé invalide, 402 = pas de crédits (paid plan), 429 = rate limit.
+        const status = elevenLabsResponse.status;
+        const reason =
+          status === 401
+            ? 'auth_invalid'
+            : status === 402
+              ? 'no_credits'
+              : status === 429
+                ? 'rate_limit'
+                : status >= 500
+                  ? 'elevenlabs_down'
+                  : 'http_error';
+        // Log explicite pour Railway logs (recherchable)
+        console.warn(`⚠️ [AJNAYA] ElevenLabs ${status} (${reason})`);
+        // Body court pour debug (max 500 chars)
+        try {
+          const errBody = await elevenLabsResponse.text();
+          console.warn('⚠️ [AJNAYA] ElevenLabs body:', errBody.substring(0, 500));
+        } catch {}
+        // Stocker la raison pour la remonter dans la réponse JSON finale
+        res.locals._elevenlabsFailReason = reason;
+        res.locals._elevenlabsHttpStatus = status;
         // Continuer vers fallback
       } catch (elevenLabsError: any) {
         console.warn('⚠️ [AJNAYA] ElevenLabs erreur:', elevenLabsError.message);
+        res.locals._elevenlabsFailReason = 'network_error';
         // Continuer vers fallback
       }
     }
@@ -563,12 +972,27 @@ router.post('/synthesize', async (req: Request, res: Response) => {
     }
 
     // Aucun TTS disponible
-    console.warn('⚠️ [AJNAYA] Aucun service TTS disponible');
+    // v1.10.60 — Inclure la vraie raison ElevenLabs pour le front (debug user).
+    const elevenlabsReason = res.locals._elevenlabsFailReason;
+    const elevenlabsHttpStatus = res.locals._elevenlabsHttpStatus;
+    const userMessage =
+      elevenlabsReason === 'no_credits'
+        ? 'Crédits voix Ajnaya épuisés — recharge en cours'
+        : elevenlabsReason === 'auth_invalid'
+          ? 'Clé voix Ajnaya invalide — contacte le support'
+          : elevenlabsReason === 'rate_limit'
+            ? 'Trop de demandes voix — réessaie dans quelques secondes'
+            : 'Synthèse vocale temporairement indisponible';
+    console.warn(
+      `⚠️ [AJNAYA] Aucun service TTS disponible (reason=${elevenlabsReason ?? 'unknown'})`,
+    );
     res.json({
       success: true,
       audio: null,
-      message: 'Synthèse vocale non disponible',
+      message: userMessage,
       provider: 'none',
+      provider_failure_reason: elevenlabsReason,
+      provider_http_status: elevenlabsHttpStatus,
       response_time_ms: Date.now() - startTime,
     });
   } catch (error: any) {
@@ -734,12 +1158,17 @@ function getFallbackResponse(message: string): string {
 }
 
 function getVoiceSettings(emotion: string) {
+  // ElevenLabs v3 voice_settings — vérifié via /v1/models 03/05 :
+  // eleven_v3 retourne can_use_style: false + can_use_speaker_boost: false
+  // → ces 2 paramètres sont SILENCIEUSEMENT IGNORÉS par v3.
+  // Seuls stability + similarity_boost (+ speed) sont effectifs.
+  // L'expressivité v3 vient des AUDIO TAGS dans le texte (cf prompt système).
   const settings: Record<string, any> = {
-    neutral: { stability: 0.5, similarity_boost: 0.75, style: 0.5 },
-    happy: { stability: 0.4, similarity_boost: 0.75, style: 0.6 },
-    excited: { stability: 0.3, similarity_boost: 0.75, style: 0.8 },
-    calm: { stability: 0.7, similarity_boost: 0.75, style: 0.2 },
-    urgent: { stability: 0.2, similarity_boost: 0.9, style: 0.9 },
+    neutral: { stability: 0.4, similarity_boost: 0.75 },
+    happy: { stability: 0.4, similarity_boost: 0.75 },
+    excited: { stability: 0.35, similarity_boost: 0.75 },
+    calm: { stability: 0.55, similarity_boost: 0.75 },
+    urgent: { stability: 0.3, similarity_boost: 0.85 },
   };
 
   return settings[emotion] || settings.neutral;
@@ -762,8 +1191,10 @@ async function handleTranscription(
   try {
     const transcription = await openai.audio.transcriptions.create({
       file: fs.createReadStream(tempFilePath),
-      model: 'whisper-1',
+      model: 'gpt-4o-transcribe',
       language: 'fr',
+      prompt: VTC_FR_TRANSCRIBE_PROMPT,
+      temperature: 0,
     });
 
     fs.unlinkSync(tempFilePath);
@@ -819,8 +1250,13 @@ async function handleSynthesis(text: string): Promise<{ audio: string | null; pr
           },
           body: JSON.stringify({
             text: text.substring(0, 1000),
-            model_id: 'eleven_multilingual_v2',
-            voice_settings: { stability: 0.5, similarity_boost: 0.75, style: 0.5, speed: 1.0 },
+            model_id: 'eleven_v3',
+            // v3 ignore style + use_speaker_boost → on les omet
+            voice_settings: {
+              stability: 0.4,
+              similarity_boost: 0.75,
+              speed: 1.22,
+            },
           }),
         },
       );

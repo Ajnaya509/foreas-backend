@@ -52,6 +52,54 @@ interface Disruption {
  * "TRANSPORT : Metro 1 perturbé (signal), RER A interrompu Chatelet-Nation. Afflux passagers prévu."
  * "TRANSPORT : Aucune perturbation majeure métro/RER. Trafic normal."
  */
+export interface StructuredDisruption {
+  cause: string;
+  type: string;
+  title: string;
+  line: string;
+}
+
+export async function getStructuredDisruptions(): Promise<StructuredDisruption[]> {
+  const apiKey = process.env.IDFM_API_KEY || process.env.CLÉ_API_IDFM || process.env.CLE_API_IDFM;
+  if (!apiKey) return [];
+
+  try {
+    const url =
+      'https://prim.iledefrance-mobilites.fr/marketplace/v2/navitia/line_reports?disable_geojson=true&count=50';
+
+    const res = await fetch(url, {
+      headers: { Accept: 'application/json', apikey: apiKey },
+      signal: AbortSignal.timeout(3000),
+    });
+    if (!res.ok) return [];
+
+    const data = await res.json();
+    const raw: any[] = data?.disruptions ?? [];
+
+    return raw.slice(0, 20).map((d: any) => {
+      const msg: string = d.messages?.[0]?.text ?? d.severity?.name ?? '';
+      const cause: string = d.cause ?? d.severity?.name ?? 'perturbation';
+      const lineCodes: string[] = (d.impacted_objects ?? [])
+        .flatMap((o: any) =>
+          o.pt_object?.embedded_type === 'line' ? [o.pt_object?.line?.code ?? ''] : [],
+        )
+        .filter(Boolean);
+
+      return {
+        cause:
+          cause.toLowerCase().includes('grève') || cause.toLowerCase().includes('strike')
+            ? 'grève'
+            : cause,
+        type: d.severity?.name ?? 'perturbation',
+        title: msg.slice(0, 80) || cause,
+        line: lineCodes[0] ?? '',
+      };
+    });
+  } catch {
+    return [];
+  }
+}
+
 export async function getTransportContext(): Promise<string> {
   // Check cache
   if (transportCache && Date.now() < transportCache.expires) {

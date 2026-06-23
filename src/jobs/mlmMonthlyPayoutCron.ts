@@ -6,11 +6,14 @@
  *   POST /api/internal/run-mlm-monthly-payout
  *   Header: X-Internal-Secret = CRON_SECRET
  *
- * Mécanique unifiée chauffeur + partner :
- *   - N1 = 10 € par mois × N filleuls actifs
- *   - N2 =  4 € par mois × filleuls de filleuls
- *   - N3 =  2 € par mois × niveau 3
+ * Mécanique (Referral Program V3 — 2026-06-22) :
+ *   - CHAUFFEUR : MONO-NIVEAU. Parrain direct (N1) uniquement. Montant TIÉRÉ selon son
+ *     nb de filleuls actifs+vérifiés : 25€ (0-14) / 35€ (15-49) / 50€ (50+).
+ *     Source de vérité DB = referral_program_tiers + get_referral_commission_amount().
+ *   - PARTENAIRE : barème COMMISSION_BY_LEVEL inchangé (deal séparé, à retravailler).
  *
+ * Gates chauffeur : filleul vtc_card_verified=true (anti-fraude Claude Vision) +
+ *   parrain SANS partner_id + parrain subscription_active.
  * Carence : `qualified_for_referral=true` requis sur le filleul (= 1 mois complet payé)
  * Récurrence : tant que filleul `subscription_active=true`
  * Idempotence : (sponsor_id, referred_id, commission_month, level) UNIQUE
@@ -20,9 +23,10 @@
 import { createClient, SupabaseClient } from '@supabase/supabase-js';
 import Stripe from 'stripe';
 
+// Pricing V2 (09/06/2026) : 25€ / 8€ / 2€ — cascade dès le 1er paiement
 const COMMISSION_BY_LEVEL: Record<1 | 2 | 3, number> = {
-  1: 10,
-  2: 4,
+  1: 25,
+  2: 8,
   3: 2,
 };
 
@@ -42,6 +46,24 @@ function getStripe(): Stripe {
     apiVersion: '2024-12-18.acacia' as any,
   });
   return _stripe;
+}
+
+/** Fire-and-forget vers le webhook Pieuvre N8N — ne bloque jamais le cron */
+function notifyPieuvre(event: string, payload: Record<string, unknown>): void {
+  const webhookUrl = process.env.PIEUVRE_MLM_WEBHOOK_URL;
+  const secret = process.env.PIEUVRE_MLM_SECRET;
+  if (!webhookUrl || !secret) return;
+  fetch(webhookUrl, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'X-Foreas-Shared-Secret': secret,
+    },
+    body: JSON.stringify({ event, ...payload }),
+  }).catch((err: Error) => {
+    console.warn(`[MlmCron] Pieuvre notify failed for event "${event}":`, err?.message);
+  });
+  console.log(`[MlmCron] Pieuvre notified event="${event}"`);
 }
 
 /** Premier jour du mois courant en YYYY-MM-DD */
@@ -144,9 +166,33 @@ async function insertCommissionIdempotent(
   level: 1 | 2 | 3,
   commissionMonth: string,
 ): Promise<{ id: string; amount: number; type: 'driver' | 'partner' } | null> {
-  const amount = COMMISSION_BY_LEVEL[level];
-
   if (sponsor.type === 'driver') {
+    // ── Referral Program V3 (2026-06-22) : MONO-NIVEAU + montant tiéré 25/35/50 ──
+    // On ne paie que le parrain DIRECT (N1). Les niveaux 2/3 ne sont plus payés.
+    if (level !== 1) return null;
+
+    // Anti-fraude : le filleul ne compte que si sa carte VTC est vérifiée (Claude Vision + anti-IA).
+    const { data: filleul } = await supa
+      .from('drivers')
+      .select('vtc_card_verified')
+      .eq('id', filleulId)
+      .maybeSingle();
+    if (!filleul?.vtc_card_verified) return null;
+
+    // Parrain inscrit au programme PARTENAIRE → deal séparé (partner_commissions), pas de commission MLM chauffeur.
+    const { data: sp } = await supa
+      .from('drivers')
+      .select('partner_id')
+      .eq('id', sponsor.id)
+      .maybeSingle();
+    if (sp?.partner_id) return null;
+
+    // Montant tiéré selon le palier du parrain (25/35/50) — source de vérité DB referral_program_tiers.
+    const { data: tieredAmount } = await supa.rpc('get_referral_commission_amount', {
+      p_sponsor_id: sponsor.id,
+    });
+    const amount = typeof tieredAmount === 'number' ? tieredAmount : 25;
+
     // Idempotence
     const { data: existing } = await supa
       .from('referral_commissions')
@@ -178,6 +224,7 @@ async function insertCommissionIdempotent(
     }
     return { id: created.id, amount, type: 'driver' };
   } else {
+    const amount = COMMISSION_BY_LEVEL[level]; // Partenaires : barème inchangé (deal séparé, à retravailler)
     // Partner
     const { data: existing } = await supa
       .from('partner_commissions')
@@ -284,6 +331,12 @@ export async function runMlmMonthlyPayout(): Promise<CronResult> {
     duration_ms: 0,
   };
 
+  // Aggrège les transfers par sponsor pour le payload Pieuvre
+  const transfersMap = new Map<
+    string,
+    { sponsor_id: string; sponsor_type: string; amount: number; levels: number[] }
+  >();
+
   try {
     // 1) List tous les filleuls qualifiés actifs
     const { data: filleuls, error: filErr } = await supa
@@ -338,6 +391,19 @@ export async function runMlmMonthlyPayout(): Promise<CronResult> {
           if (payRes.ok) {
             result.transfers_succeeded++;
             result.total_paid_eur += commission.amount;
+            // Agréger pour le webhook Pieuvre
+            const existing = transfersMap.get(sponsor.id);
+            if (existing) {
+              existing.amount += commission.amount;
+              existing.levels.push(level);
+            } else {
+              transfersMap.set(sponsor.id, {
+                sponsor_id: sponsor.id,
+                sponsor_type: sponsor.type,
+                amount: commission.amount,
+                levels: [level],
+              });
+            }
           } else if (payRes.error === 'no_stripe_account') {
             result.transfers_skipped_no_account++;
           } else {
@@ -370,6 +436,14 @@ export async function runMlmMonthlyPayout(): Promise<CronResult> {
       });
     } catch (logErr) {
       console.warn('[MlmCron] log workflow failed (non-blocking):', logErr);
+    }
+
+    // 4) Notifier Pieuvre (fire-and-forget) si au moins 1 transfer a réussi
+    if (result.transfers_succeeded > 0) {
+      notifyPieuvre('mlm_payout_done', {
+        commission_month: commissionMonth,
+        transfers: Array.from(transfersMap.values()),
+      });
     }
   } catch (err: any) {
     result.ok = false;

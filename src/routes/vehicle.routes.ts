@@ -1,6 +1,6 @@
 /**
  * Vehicle Routes — Vérification IA + auto-fill marque/modèle
- * v1.10.47 — Claude Vision (claude-haiku-4-5)
+ * v1.10.47 — Claude Vision (claude-sonnet-4-6)
  *
  * POST /api/vehicle/verify-photo
  *   body: { photoBase64?: string, photoUrl?: string }
@@ -105,7 +105,7 @@ Règles :
 - Si tu n'es pas sûr de la marque/modèle/couleur, mets null (pas de devinette hasardeuse)`;
 
     const message = await client.messages.create({
-      model: 'claude-haiku-4-5',
+      model: 'claude-sonnet-4-6',
       max_tokens: 300,
       system: systemPrompt,
       messages: [
@@ -477,7 +477,7 @@ RÈGLE STRICTE : Réponds UNIQUEMENT en JSON pur (pas de markdown, pas de \`\`\`
 Si tu doutes d'un champ, mets null. Le champ "warnings" liste les anomalies (ex: "qualité photo basse", "expiration proche", "cachet flou").`;
 
     const message = await client.messages.create({
-      model: 'claude-haiku-4-5',
+      model: 'claude-sonnet-4-6',
       max_tokens: 800,
       system: systemPrompt,
       messages: [
@@ -531,7 +531,7 @@ Si tu doutes d'un champ, mets null. Le champ "warnings" liste les anomalies (ex:
             ai_is_authentic: typeof result.isAuthentic === 'boolean' ? result.isAuthentic : null,
             ai_extracted_data: result.extracted ?? {},
             ai_warnings: result.warnings ?? [],
-            ai_model_version: 'claude-haiku-4-5',
+            ai_model_version: 'claude-sonnet-4-6',
             status,
             rejection_reason:
               status === 'rejected' ? (result.warnings?.[0] ?? 'Document non authentique') : null,
