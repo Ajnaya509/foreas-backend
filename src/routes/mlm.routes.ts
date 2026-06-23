@@ -3,13 +3,17 @@
  * v1.10.55 — 2 mai 2026
  *
  * ROUTES ADMIN (auth admin requise) :
- *   GET   /api/admin/partners                 → liste partners + KPIs
- *   GET   /api/admin/partners/:id             → fiche complète + filleuls
- *   PATCH /api/admin/partners/:id/discount    → set discount config
- *   GET   /api/admin/partners/:id/recruits    → table chauffeurs recrutés
- *   GET   /api/admin/payouts/pending          → commissions en attente (vue agrégée)
- *   GET   /api/admin/payouts/history          → historique versements
- *   POST  /api/admin/payouts/run-cron-now     → debug : run cron immédiat
+ *   GET   /api/admin/partners                              → liste partners + KPIs
+ *   GET   /api/admin/partners/:id                          → fiche complète + filleuls
+ *   PATCH /api/admin/partners/:id/discount                 → set discount config
+ *   GET   /api/admin/partners/:id/recruits                 → table chauffeurs recrutés
+ *   GET   /api/admin/payouts/pending                       → commissions en attente (vue agrégée)
+ *   GET   /api/admin/payouts/history                       → historique versements
+ *   POST  /api/admin/payouts/run-cron-now                  → debug : run cron immédiat
+ *   POST  /api/admin/partner-applications/:id/approve      → (TROU #2) approuver candidature site
+ *
+ * ROUTES PARTENAIRE (auth partenaire requise) :
+ *   POST  /api/partner/stripe/connect-link                 → (TROU #3) lien onboarding Stripe Connect
  *
  * ROUTES PUBLIQUES (aucune auth) :
  *   GET   /api/public/partners/:referralCode/landing → données pour la page CAP fil Site
@@ -462,6 +466,225 @@ router.post('/public/partners/signup', async (req: Request, res: Response) => {
     });
   } catch (err: any) {
     console.error('[MlmPublic] signup error:', err?.message);
+    return res.status(500).json({ error: err?.message });
+  }
+});
+
+// ════════════════════════════════════════════════════════════════════════
+// Stripe lazy singleton (partagé avec les endpoints partenaire)
+// ════════════════════════════════════════════════════════════════════════
+let _stripe: any = null;
+async function getStripe() {
+  if (_stripe) return _stripe;
+  const Stripe = (await import('stripe')).default;
+  _stripe = new Stripe(process.env.STRIPE_SECRET_KEY!, {
+    apiVersion: '2024-12-18.acacia' as any,
+  });
+  return _stripe;
+}
+
+// ════════════════════════════════════════════════════════════════════════
+// POST /api/admin/partner-applications/:id/approve — TROU #2
+//
+// 1. Lit partner_applications (status='pending')
+// 2. Génère referral_code unique + crée ligne partners
+// 3. Marque l'application 'approved'
+// 4. Invite auth Supabase (magic-link set-password) → partner.user_id = user.id
+// 5. Crée compte Stripe Connect Express + lien onboarding
+//
+// Réponse : { ok, referral_code, onboarding_url }
+// ════════════════════════════════════════════════════════════════════════
+router.post(
+  '/admin/partner-applications/:id/approve',
+  requireAdmin,
+  async (req: Request, res: Response) => {
+    const applicationId = req.params.id;
+    const adminUserId = (req as any).adminUserId as string;
+    const supa = getSupa();
+
+    try {
+      // 1. Lire l'application
+      const { data: application, error: appErr } = await supa
+        .from('partner_applications')
+        .select('id, company_name, contact_name, email, phone, siret, status')
+        .eq('id', applicationId)
+        .maybeSingle();
+
+      if (appErr || !application) {
+        return res.status(404).json({ error: 'Candidature introuvable' });
+      }
+      if (application.status !== 'pending') {
+        return res.status(409).json({ error: `Candidature déjà ${application.status}` });
+      }
+
+      // 2. Générer code unique
+      const referralCode = await generateUniquePartnerCode(supa, application.company_name);
+
+      // 3. Créer la ligne partners
+      const { data: partner, error: partnerErr } = await supa
+        .from('partners')
+        .insert({
+          company_name: application.company_name,
+          contact_email: application.email,
+          contact_phone: application.phone ?? null,
+          company_type: 'autre',
+          siret: application.siret ?? null,
+          referral_code: referralCode,
+          status: 'active',
+          discount_percent_for_recruits: 0,
+          discount_duration_months: 1,
+          is_promo_active: false,
+          approved_at: new Date().toISOString(),
+        })
+        .select('id')
+        .single();
+
+      if (partnerErr || !partner) {
+        console.error('[PartnerApprove] insert partners failed:', partnerErr);
+        return res.status(500).json({ error: partnerErr?.message ?? 'Erreur création partenaire' });
+      }
+
+      // 4. Marquer l'application approuvée
+      await supa
+        .from('partner_applications')
+        .update({
+          status: 'approved',
+          reviewed_at: new Date().toISOString(),
+          reviewed_by: adminUserId,
+        })
+        .eq('id', applicationId);
+
+      // 5. Inviter l'utilisateur via Supabase auth (magic-link set-password)
+      //    → user.id récupéré pour relier partners.user_id
+      let onboardingUrl: string | null = null;
+      try {
+        const { data: inviteData, error: inviteErr } = await supa.auth.admin.inviteUserByEmail(
+          application.email,
+          {
+            data: {
+              partner_id: partner.id,
+              full_name: application.contact_name ?? application.company_name,
+            },
+            redirectTo: 'https://partners.foreas.xyz/auth/callback',
+          },
+        );
+
+        if (!inviteErr && inviteData?.user?.id) {
+          // Lier user_id → partners
+          await supa.from('partners').update({ user_id: inviteData.user.id }).eq('id', partner.id);
+        }
+
+        // 6. Créer Stripe Connect Express + lien onboarding
+        const stripe = await getStripe();
+        const account = await stripe.accounts.create({
+          type: 'express',
+          country: 'FR',
+          email: application.email,
+          capabilities: {
+            card_payments: { requested: true },
+            transfers: { requested: true },
+          },
+          business_type: 'company',
+          metadata: { partner_id: partner.id, platform: 'FOREAS' },
+        });
+
+        await supa.from('partners').update({ stripe_account_id: account.id }).eq('id', partner.id);
+
+        const accountLink = await stripe.accountLinks.create({
+          account: account.id,
+          refresh_url: 'https://partners.foreas.xyz/partner',
+          return_url: 'https://partners.foreas.xyz/partner',
+          type: 'account_onboarding',
+        });
+
+        onboardingUrl = accountLink.url;
+      } catch (sideErr: any) {
+        // Invite ou Stripe échoue → partenaire créé, on log mais on ne rollback pas
+        console.warn('[PartnerApprove] side-effect error (non-blocking):', sideErr?.message);
+      }
+
+      console.log(
+        `[PartnerApprove] ✅ ${application.company_name} approuvé → code ${referralCode}`,
+      );
+      return res.json({ ok: true, referral_code: referralCode, onboarding_url: onboardingUrl });
+    } catch (err: any) {
+      console.error('[PartnerApprove] error:', err?.message);
+      return res.status(500).json({ error: err?.message });
+    }
+  },
+);
+
+// ════════════════════════════════════════════════════════════════════════
+// POST /api/partner/stripe/connect-link — TROU #3
+//
+// Génère (ou régénère) le lien d'onboarding Stripe Connect Express
+// pour le partenaire authentifié. Crée le compte si absent.
+//
+// Auth : Bearer token Supabase du partenaire (pas admin)
+// Réponse : { ok, url }
+// ════════════════════════════════════════════════════════════════════════
+router.post('/partner/stripe/connect-link', async (req: Request, res: Response) => {
+  const authHeader = req.headers.authorization;
+  if (!authHeader?.startsWith('Bearer ')) {
+    return res.status(401).json({ error: 'Bearer token requis' });
+  }
+
+  const supa = getSupa();
+  const token = authHeader.replace('Bearer ', '');
+
+  try {
+    // Auth
+    const { data: authData, error: authErr } = await supa.auth.getUser(token);
+    if (authErr || !authData?.user?.id) {
+      return res.status(401).json({ error: 'Token invalide' });
+    }
+
+    // Récupérer la fiche partenaire
+    const { data: partner, error: partnerErr } = await supa
+      .from('partners')
+      .select('id, company_name, contact_email, stripe_account_id')
+      .eq('user_id', authData.user.id)
+      .maybeSingle();
+
+    if (partnerErr || !partner) {
+      return res.status(404).json({ error: 'Compte partenaire introuvable' });
+    }
+
+    const stripe = await getStripe();
+    let accountId = partner.stripe_account_id;
+
+    // Créer le compte Express si absent
+    if (!accountId) {
+      const account = await stripe.accounts.create({
+        type: 'express',
+        country: 'FR',
+        email: partner.contact_email,
+        capabilities: {
+          card_payments: { requested: true },
+          transfers: { requested: true },
+        },
+        business_type: 'company',
+        metadata: { partner_id: partner.id, platform: 'FOREAS' },
+      });
+      accountId = account.id;
+
+      await supa.from('partners').update({ stripe_account_id: accountId }).eq('id', partner.id);
+
+      // Webhook account.updated gérera charges_enabled / payouts_enabled
+      console.log(`[PartnerConnect] ✅ Compte Express créé : ${accountId} → partner ${partner.id}`);
+    }
+
+    // Générer le lien d'onboarding
+    const accountLink = await stripe.accountLinks.create({
+      account: accountId,
+      refresh_url: 'https://partners.foreas.xyz/partner',
+      return_url: 'https://partners.foreas.xyz/partner',
+      type: 'account_onboarding',
+    });
+
+    return res.json({ ok: true, url: accountLink.url, onboarding_url: accountLink.url });
+  } catch (err: any) {
+    console.error('[PartnerConnect] error:', err?.message);
     return res.status(500).json({ error: err?.message });
   }
 });
