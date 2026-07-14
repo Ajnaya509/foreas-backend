@@ -538,6 +538,179 @@ router.post('/finalize-signup', async (req: Request, res: Response) => {
 });
 
 /**
+ * POST /api/auth/complete-driver-profile
+ *
+ * 14/07 — le vrai chemin de signup (client-side AuthService.signupDriver, PAS
+ * finalize-signup ci-dessus qui est mort) appelait directement supabase.auth
+ * .signUp() puis écrivait sur `drivers` avec le client anon. Or "Confirm email"
+ * est ACTIF sur le projet live (confirmé en base) : signUp() ne retourne AUCUNE
+ * session tant que l'email n'est pas confirmé → auth.uid() = null côté client →
+ * RLS rejette systématiquement l'écriture ("new row violates row-level security
+ * policy"), 100% des inscriptions échouaient à ce stade précis (après la
+ * récursion RLS déjà corrigée plus tôt). On garde signUp() côté client (c'est
+ * lui qui déclenche l'email de confirmation Supabase natif) mais on déplace la
+ * complétion du profil (code parrainage + upsert drivers) ici, en service_role
+ * — plus aucune dépendance à une session pour cette étape.
+ */
+router.post('/complete-driver-profile', async (req: Request, res: Response) => {
+  try {
+    await loadHelpers();
+
+    const { userId, email, firstName, lastName, phone, referralCodeUsed } = req.body as {
+      userId?: string;
+      email?: string;
+      firstName?: string;
+      lastName?: string;
+      phone?: string;
+      referralCodeUsed?: string;
+    };
+
+    if (!userId || !email || !firstName || !lastName || !phone) {
+      return res.status(400).json({
+        success: false,
+        error: 'MISSING_PARAMS',
+        message: 'userId, email, firstName, lastName et phone sont requis',
+      });
+    }
+
+    // Anti-spoofing minimal : cet endpoint est appelable sans session (c'est le
+    // but), donc on vérifie que userId correspond bien à un vrai auth user avec
+    // CET email — évite qu'un appel forgé écrive un profil sur l'id de quelqu'un
+    // d'autre.
+    const { data: authUserLookup, error: authUserErr } =
+      await supabaseAdmin.auth.admin.getUserById(userId);
+    if (
+      authUserErr ||
+      !authUserLookup?.user ||
+      authUserLookup.user.email?.toLowerCase() !== email.toLowerCase()
+    ) {
+      return res.status(403).json({
+        success: false,
+        error: 'IDENTITY_MISMATCH',
+        message: 'userId ne correspond pas à cet email',
+      });
+    }
+
+    // Idempotence : si le profil est déjà complet (code déjà assigné), renvoyer tel quel.
+    const { data: existingDriver } = await supabaseAdmin
+      .from('drivers')
+      .select('id, referral_code')
+      .eq('id', userId)
+      .maybeSingle();
+
+    if (existingDriver?.referral_code) {
+      return res.json({
+        success: true,
+        driverId: userId,
+        referralCode: existingDriver.referral_code,
+        alreadyCompleted: true,
+      });
+    }
+
+    // Sponsor (si code parrainage saisi à l'inscription)
+    let sponsorId: string | null = null;
+    if (referralCodeUsed) {
+      const { data: sponsor } = await supabaseAdmin
+        .from('drivers')
+        .select('id')
+        .eq('referral_code', referralCodeUsed.trim().toUpperCase())
+        .maybeSingle();
+      sponsorId = sponsor?.id ?? null;
+    }
+
+    const referralCode = await generateUniqueDriverReferralCode(firstName, lastName);
+
+    const driverPayload = {
+      id: userId,
+      email: email.toLowerCase().trim(),
+      name: `${firstName} ${lastName}`,
+      phone,
+      auth_user_id: userId,
+      first_name: firstName,
+      last_name: lastName,
+      referral_code: referralCode,
+      referred_by: sponsorId,
+      total_direct_referrals: 0,
+      eligible_referrals: 0,
+      mlm_earnings_pending: 0,
+      mlm_earnings_paid: 0,
+      total_earnings: 0,
+      status: 'pending',
+      subscription_active: false,
+      subscription_start_date: null,
+      subscription_price: 19.97,
+    };
+
+    const { data: driverData, error: driverError } = await supabaseAdmin
+      .from('drivers')
+      .upsert(driverPayload, { onConflict: 'id' })
+      .select()
+      .single();
+
+    if (driverError) {
+      console.error('[Auth] complete-driver-profile — upsert driver FAILED:', driverError.message);
+      // Rollback réel (service_role) — le rollback client-side existant ne
+      // marchait jamais avec la clé anon (auth.admin.* exige service_role).
+      try {
+        await supabaseAdmin.auth.admin.deleteUser(userId);
+        console.log(`[Auth] complete-driver-profile — rollback auth user réussi (${userId})`);
+      } catch (rollbackErr: any) {
+        console.error('[Auth] complete-driver-profile — rollback FAILED:', rollbackErr?.message);
+      }
+      return res.status(500).json({
+        success: false,
+        error: 'DRIVER_CREATE_FAILED',
+        message: 'Erreur lors de la création du profil chauffeur',
+      });
+    }
+
+    console.log(`[Auth] complete-driver-profile OK — driver=${userId} referral=${referralCode}`);
+    return res.json({ success: true, driverId: userId, referralCode: driverData.referral_code });
+  } catch (error: any) {
+    console.error('[Auth] complete-driver-profile exception:', error.message);
+    return res.status(500).json({
+      success: false,
+      error: 'INTERNAL_ERROR',
+      message: 'Erreur interne du serveur',
+    });
+  }
+});
+
+/** Même format que src/lib/referral.ts (client) : NOM + initiale prénom + AAAA + 2 alphanum. */
+async function generateUniqueDriverReferralCode(
+  firstName: string,
+  lastName: string,
+): Promise<string | null> {
+  const normalize = (s: string) =>
+    s
+      .trim()
+      .toUpperCase()
+      .normalize('NFD')
+      .replace(/\p{Diacritic}/gu, '')
+      .replace(/[^A-Z]/g, '');
+
+  const lastNorm = normalize(lastName);
+  const firstNorm = normalize(firstName);
+  if (lastNorm.length < 2 || firstNorm.length < 1) return null;
+
+  const base = lastNorm + firstNorm[0] + new Date().getFullYear();
+  const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
+
+  for (let attempt = 0; attempt < 50; attempt++) {
+    let suffix = '';
+    for (let i = 0; i < 2; i++) suffix += chars[Math.floor(Math.random() * chars.length)];
+    const candidate = base + suffix;
+    const { data: exists } = await supabaseAdmin
+      .from('drivers')
+      .select('id')
+      .eq('referral_code', candidate)
+      .maybeSingle();
+    if (!exists) return candidate;
+  }
+  return null;
+}
+
+/**
  * GET /api/auth/otp/status
  */
 router.get('/otp/status', (req: Request, res: Response) => {
