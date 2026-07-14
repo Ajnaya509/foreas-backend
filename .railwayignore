@@ -1,0 +1,8 @@
+node_modules
+.expo
+ios
+.env.local
+.env
+foreas-app-screenshot.png
+*.md
+test-*.json

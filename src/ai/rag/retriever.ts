@@ -94,6 +94,170 @@ export async function searchDocuments(
   return results;
 }
 
+// ============================================
+// ÉTAPE 2 — RECHERCHE GOUVERNÉE + HYBRIDE + RERANKER
+// search_knowledge (CORE prioritaire, sens+mots, filtres) → reranker Cohere
+// ============================================
+
+export interface KnowledgeOptions {
+  maxResults?: number; // top-N final (après rerank)
+  candidates?: number; // top-K avant rerank
+  threshold?: number;
+  collections?: string[] | null;
+  includeLearned?: boolean;
+  intent?: 'driver' | 'sell' | 'all'; // aiguillage : chauffeur vs vente/prospect
+}
+
+// ============================================
+// AIGUILLAGE D'INTENTION
+// Un CHAUFFEUR ne doit pas tomber sur le savoir de VENTE
+// (ex. "gagner plus" → zones/objectif, PAS la formation freelance "facturer plus cher").
+// Un CLOSER/prospect a besoin de TOUT : produit + persuasion.
+// ============================================
+const DRIVER_COLLECTIONS = [
+  'ajnaya_product',
+  'general',
+  'onboarding_ajnaya',
+  'fiscal_compta',
+  'mindset_discipline',
+  'foreas_pricing_internal',
+];
+const SELL_COLLECTIONS = [
+  'vente',
+  'closing_reseaux',
+  'objections',
+  'copywriting',
+  'email_marketing',
+  'temoignages',
+  'ajnaya_product',
+  'general',
+  'foreas_pricing_internal',
+];
+const SELL_SIGNALS = [
+  'pourquoi je paierai',
+  'pourquoi payer',
+  'déjà uber',
+  'deja uber',
+  'déjà bolt',
+  'deja bolt',
+  'vs uber',
+  'vs bolt',
+  'abonnement',
+  'ça coûte',
+  'ca coute',
+  'combien ça',
+  'combien ca',
+  'convaincre',
+  'prospect',
+  'hésite',
+  'hesite',
+  'arnaque',
+  'gratuit ailleurs',
+  'pourquoi foreas',
+  'à quoi ça sert',
+  "pourquoi m'abonner",
+  "s'inscrire",
+  'inscription',
+];
+
+/** Choisit les collections selon l'intention (explicite > intent > auto-détection). */
+function resolveCollections(query: string, opts: KnowledgeOptions): string[] | null {
+  if (opts.collections && opts.collections.length) return opts.collections; // explicite gagne
+  if (opts.intent === 'all') return null;
+  if (opts.intent === 'driver') return DRIVER_COLLECTIONS;
+  if (opts.intent === 'sell') return SELL_COLLECTIONS;
+  // auto : signaux de vente/prospect → SELL, sinon contexte chauffeur
+  const q = query.toLowerCase();
+  if (SELL_SIGNALS.some((s) => q.includes(s))) return SELL_COLLECTIONS;
+  return DRIVER_COLLECTIONS;
+}
+
+/** Recherche gouvernée (CORE prioritaire) + hybride (sens + mots) + reranker. */
+export async function searchKnowledge(
+  query: string,
+  options: KnowledgeOptions = {},
+): Promise<SearchResult[]> {
+  const supabase = getSupabaseAdmin();
+  const openai = getOpenAIClient();
+  const topN = options.maxResults || 5;
+  const candidates = options.candidates || Math.max(topN * 3, 12);
+
+  if (!openai.isConfigured()) return textSearch(query, topN);
+
+  let queryEmbedding: number[];
+  try {
+    const response = await openai.embed({ input: query, model: EMBEDDING_MODEL });
+    queryEmbedding = response.embeddings[0];
+  } catch (err) {
+    console.error('[RAG searchKnowledge] embedding failed:', err);
+    return textSearch(query, topN);
+  }
+
+  const collections = resolveCollections(query, options);
+  const { data, error } = await supabase.rpc('search_knowledge', {
+    query_embedding: queryEmbedding,
+    query_text: query,
+    match_count: candidates,
+    // seuil abaissé (0.45 → 0.30) : on laisse passer plus de candidats,
+    // le reranker Cohere tranche ensuite (fini les "je ne sais pas" alors que la réponse existe).
+    match_threshold: options.threshold ?? 0.3,
+    filter_collections: collections,
+    include_learned: options.includeLearned ?? true,
+  });
+
+  if (error) {
+    console.error('[RAG searchKnowledge] rpc failed:', error.message);
+    return textSearch(query, topN);
+  }
+
+  const results: SearchResult[] = (data || []).map((row: any) => ({
+    chunk_id: row.id,
+    document_id: row.document_id,
+    document_title: row.collection || '',
+    content: row.chunk_text || '',
+    similarity: row.similarity || 0,
+  }));
+
+  return rerankCohere(query, results, topN);
+}
+
+/** Reranker Cohere (2e tri de précision). Sans clé / erreur → top-N inchangé. */
+async function rerankCohere(
+  query: string,
+  results: SearchResult[],
+  topN: number,
+): Promise<SearchResult[]> {
+  const key = process.env.COHERE_API_KEY;
+  if (!key || results.length <= 1) return results.slice(0, topN);
+  try {
+    const resp = await fetch('https://api.cohere.com/v2/rerank', {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${key}`, 'content-type': 'application/json' },
+      body: JSON.stringify({
+        model: 'rerank-v3.5',
+        query,
+        documents: results.map((r) => r.content),
+        top_n: Math.min(topN, results.length),
+      }),
+    });
+    if (!resp.ok) {
+      console.warn('[RAG rerank] cohere http', resp.status);
+      return results.slice(0, topN);
+    }
+    const data: any = await resp.json();
+    const ranked = (data.results || [])
+      .map((rr: any) => {
+        const base = results[rr.index];
+        return base ? { ...base, similarity: rr.relevance_score ?? base.similarity } : null;
+      })
+      .filter(Boolean) as SearchResult[];
+    return ranked.length ? ranked : results.slice(0, topN);
+  } catch (err) {
+    console.error('[RAG rerank] error:', err);
+    return results.slice(0, topN);
+  }
+}
+
 /**
  * Fallback text search when embeddings unavailable
  */

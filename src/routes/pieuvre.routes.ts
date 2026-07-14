@@ -5,8 +5,25 @@
  * POST /in-app-message — Messages in-app depuis tentacules (auth PIEUVRE_API_KEY)
  */
 import { Router, Request, Response } from 'express';
+import { latLngToCell } from 'h3-js';
 
 const router = Router();
+
+/**
+ * Calcule l'hexagone H3 (res 9, ~150 m) d'une position — CARBURANT de Chronos-2 :
+ * agréger la demande captée (Uber/Bolt/Heetch) par zone H3 → prédire où ça chauffe.
+ * Sans ça, pickup_h3 reste NULL et la demande n'est indexable par zone.
+ */
+function toH3(lat: unknown, lon: unknown): string | null {
+  const la = Number(lat);
+  const lo = Number(lon);
+  if (!Number.isFinite(la) || !Number.isFinite(lo) || (la === 0 && lo === 0)) return null;
+  try {
+    return latLngToCell(la, lo, 9);
+  } catch {
+    return null;
+  }
+}
 
 const VALID_PLATFORMS = ['uber', 'bolt', 'heetch', 'other'];
 const VALID_DECISIONS = ['accepted', 'refused', 'expired'];
@@ -65,6 +82,38 @@ router.post('/screen-reader-event', async (req: Request, res: Response) => {
     const now = new Date();
     const supa = await getSupa();
 
+    // Fallback position : le client n'attache le GPS que si la permission est déjà
+    // accordée ET qu'une position <60s existe (souvent raté en tâche de fond). Si le
+    // client n'a rien envoyé, on retombe sur la dernière position connue du chauffeur
+    // (déjà alimentée en continu par DriverPositionReporter/BackgroundLocationTask) —
+    // une position à quelques minutes reste un proxy de zone parfaitement valable ici.
+    let pickupLat = req.body.pickup_lat || null;
+    let pickupLon = req.body.pickup_lon || null;
+    // Provenance (audit Fable) : le filet réutilise la dernière position connue, qui peut
+    // dater de quelques minutes (chauffeur en mouvement) — jamais confondue avec un fix GPS
+    // frais, pour que verify_zone_predictions() puisse un jour pondérer/exclure ces lignes.
+    let pickupGeoSource: 'device' | 'server_fallback' | null =
+      pickupLat && pickupLon ? 'device' : null;
+    if (!pickupLat || !pickupLon) {
+      try {
+        const { data: lastPos } = await supa
+          .from('pieuvre_h3_driver_positions')
+          .select('latitude, longitude, updated_at')
+          .eq('driver_id', driverId)
+          .gte('updated_at', new Date(Date.now() - 10 * 60 * 1000).toISOString())
+          .order('updated_at', { ascending: false })
+          .limit(1)
+          .maybeSingle();
+        if (lastPos?.latitude && lastPos?.longitude) {
+          pickupLat = lastPos.latitude;
+          pickupLon = lastPos.longitude;
+          pickupGeoSource = 'server_fallback';
+        }
+      } catch (e: any) {
+        console.warn('[Pieuvre] screen-reader-event: fallback position lookup failed:', e?.message);
+      }
+    }
+
     const { data, error } = await supa
       .from('pieuvre_screen_reader_events')
       .insert({
@@ -74,8 +123,9 @@ router.post('/screen-reader-event', async (req: Request, res: Response) => {
         distance_km: req.body.distance_km || null,
         duration_estimated_min: req.body.duration_estimated_min || null,
         pickup_zone: req.body.pickup_zone || null,
-        pickup_lat: req.body.pickup_lat || null,
-        pickup_lon: req.body.pickup_lon || null,
+        pickup_lat: pickupLat,
+        pickup_lon: pickupLon,
+        pickup_geo_source: pickupGeoSource,
         dropoff_zone: req.body.dropoff_zone || null,
         dropoff_lat: req.body.dropoff_lat || null,
         dropoff_lon: req.body.dropoff_lon || null,
@@ -94,6 +144,9 @@ router.post('/screen-reader-event', async (req: Request, res: Response) => {
         context: req.body.context || {},
         day_of_week: now.getDay(),
         hour_of_day: now.getHours(),
+        // H3 calculé serveur (res 9) → indexe la demande par zone pour Chronos-2.
+        pickup_h3: toH3(pickupLat, pickupLon),
+        dropoff_h3: toH3(req.body.dropoff_lat, req.body.dropoff_lon),
       })
       .select('id')
       .single();
@@ -157,7 +210,7 @@ async function forwardToPieuvreScreenReaderWorkflow(payload: any): Promise<void>
 // POST /screen-reader-activated — Notifie Pieuvre que le chauffeur
 // vient d'activer les permissions Screen Reader (Notification listener,
 // Accessibility, Foreground service). Trigger un message vocal
-// Koraly de bienvenue via le workflow N8N dédié.
+// Laloosh de bienvenue via le workflow N8N dédié.
 // ═══════════════════════════════════════════════════════════════
 router.post('/screen-reader-activated', async (req: Request, res: Response) => {
   try {
@@ -261,15 +314,24 @@ router.post('/in-app-message', async (req: Request, res: Response) => {
 
       if (tokens && tokens.length > 0) {
         const truncatedContent = content.length > 100 ? content.substring(0, 97) + '...' : content;
+        // 11/07 — audit notifs : `type` devait être 'pieuvre_message' (faute de
+        // frappe technique : 'pieuvre_in_app_message' n'existe dans AUCUNE liste
+        // reconnue par le routeur app — RootNavigator.routeFromNotification).
+        // Même forme que PieuvreInboxService.present() côté client (le chemin
+        // Realtime, déjà correct) : `route`/`routeParams` lus depuis metadata si
+        // fournis par l'appelant N8N, sinon la notif marque juste "lu" (fallback
+        // déjà sûr, inchangé).
         const pushMessages = tokens.map((t: any) => ({
           to: t.token,
           sound: 'default',
           title: "Ajnaya t'a envoyé un message",
           body: truncatedContent,
           data: {
-            type: 'pieuvre_in_app_message',
-            message_id: msg.id,
-            message_type: message_type || 'general',
+            type: 'pieuvre_message',
+            messageId: msg.id,
+            messageType: message_type || 'general',
+            route: metadata?.route,
+            routeParams: metadata?.routeParams,
           },
         }));
 

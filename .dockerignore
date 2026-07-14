@@ -1,0 +1,19 @@
+# Empêche Nixpacks/Docker de COPY le dist/ depuis le repo dans /app/
+# pendant le build. Sans ça, l'étape finale `COPY . /app` écrase le dist/
+# rebuilt par `npm run build` à l'étape précédente, faisant que Railway
+# tourne sur l'ancien JS commité au lieu du nouveau.
+#
+# Cf. session 30/04/2026 — bug "Pieuvre Brain code not executing despite
+# successful deploy" causé par ce comportement Nixpacks.
+dist/
+
+# Évite aussi de copier les artefacts de dev dans l'image Docker
+node_modules/
+.env
+.env.local
+.git/
+*.log
+.DS_Store
+coverage/
+.nyc_output/
+__tests__/

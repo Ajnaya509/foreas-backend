@@ -18,6 +18,7 @@
 import { Router, Request, Response } from 'express';
 import { z } from 'zod';
 import { createClient } from '@supabase/supabase-js';
+import { sendDocumentVerified, sendDocumentRejected } from '../services/email.js';
 
 const router = Router();
 
@@ -344,6 +345,15 @@ const DocVerifySchema = z
   })
   .refine((d) => d.photoBase64 || d.photoUrl, { message: 'photoBase64 OR photoUrl required' });
 
+const DOC_LABELS: Record<(typeof DOC_TYPES)[number], string> = {
+  permis_conduire: 'Permis de conduire',
+  carte_pro_vtc: 'Carte professionnelle VTC',
+  assurance: 'Assurance véhicule',
+  rcp_vtc: 'RCP Transport de personnes',
+  kbis: 'Extrait Kbis',
+  carte_grise: 'Carte grise',
+};
+
 const DOC_PROMPTS: Record<(typeof DOC_TYPES)[number], string> = {
   permis_conduire: `Tu analyses un permis de conduire FRANÇAIS. Extrais les données et juge l'authenticité.
 Retourne JSON STRICT :
@@ -541,6 +551,30 @@ Si tu doutes d'un champ, mets null. Le champ "warnings" liste les anomalies (ex:
         );
       } catch (dbErr: any) {
         console.warn('[DocVerify] DB upsert failed:', dbErr?.message);
+      }
+
+      // Email automatique au chauffeur (Chandler, 12/07) — le résultat Claude Vision
+      // ne se voyait qu'en revenant sur l'écran Documents. Fire-and-forget : ne
+      // doit jamais retarder/bloquer la réponse à l'app (déjà en train d'afficher
+      // le résultat en direct). 'pending' = ambigu, pas d'email (rien de clair à dire).
+      if (status === 'ai_verified' || status === 'rejected') {
+        (async () => {
+          try {
+            const { data: userRes } = await supa.auth.admin.getUserById(driverId);
+            const driverEmail = userRes?.user?.email;
+            if (!driverEmail) return;
+            const firstName = userRes?.user?.user_metadata?.first_name || 'Chauffeur';
+            const docLabel = DOC_LABELS[docType];
+            if (status === 'ai_verified') {
+              await sendDocumentVerified(driverEmail, firstName, docLabel);
+            } else {
+              const reason = result.warnings?.[0] ?? 'Document non authentique';
+              await sendDocumentRejected(driverEmail, firstName, docLabel, reason);
+            }
+          } catch (emailErr: any) {
+            console.warn('[DocVerify] email send failed:', emailErr?.message);
+          }
+        })();
       }
     }
 

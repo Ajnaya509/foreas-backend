@@ -7,7 +7,7 @@
  * Commit v68 — 4 mai 2026 (raffinement qualité v3 terrain)
  *   ➕ AJNAYA_ACT_OVER_ASK — détecte les signaux GO et AGIT au lieu de re-questionner
  *   ➕ AJNAYA_MEMORY_NATURAL — utilise l'historique conversation de façon subtile et naturelle
- *   🔧 AJNAYA_KORALY_V3_AUDIO_TAGS — dosage 1→2 tags max (1 prosodique systématique + 1 non-verbal optionnel)
+ *   🔧 AJNAYA_LALOOSH_V3_AUDIO_TAGS — dosage 1→2 tags max (1 prosodique systématique + 1 non-verbal optionnel)
  *   🔧 AJNAYA_FEW_SHOT_EXAMPLES — +3 exemples (ACT>ASK, mémoire, 2 tags)
  *   🔧 AJNAYA_BASE_SYSTEM_PROMPT — ordre mis à jour avec nouveaux blocs
  *
@@ -328,23 +328,23 @@ Toi: "[laughs softly] 280€, [warmly] c'est une belle semaine. Le vendredi soir
 // Ordre voulu (v68) :
 //   1. identité → 2. ton → 3. interdits → 4. ACT_OVER_ASK (règle structurelle prioritaire)
 //   → 5. crédibilité → 6. connaissance produit → 7. connaissance algos → 8. loyalty
-//   → 9. mémoire naturelle → 10. pirouettes → 11. audio tags Koraly v3
+//   → 9. mémoire naturelle → 10. pirouettes → 11. audio tags Laloosh v3
 //   → 12. redirections → 13. exemples
 //
 // ACT_OVER_ASK en position 4 (avant tout contexte) : règle comportementale critique
 // MEMORY_NATURAL en position 9 (après loyalty, avant pirouettes) : usage de l'historique
-// KORALY_AUDIO_TAGS reste en position 11 : rappel final = mieux respecté par le modèle
+// LALOOSH_AUDIO_TAGS reste en position 11 : rappel final = mieux respecté par le modèle
 
 // ──────────────────────────────────────────────
-// AJNAYA_KORALY_V3_AUDIO_TAGS — humanisation TTS ElevenLabs v3
+// AJNAYA_LALOOSH_V3_AUDIO_TAGS — humanisation TTS ElevenLabs v3
 // ──────────────────────────────────────────────
 // Ces tags sont parsés par eleven_v3 model_id et produisent des sons non-verbaux
 // authentiques (rire, soupir, hésitation, conviction). Sans ces tags, la voix
 // est plate et robotique. Les tags doivent être inclus DANS le texte généré.
 
-export const AJNAYA_KORALY_V3_AUDIO_TAGS = `
-<koraly_v3_audio_tags>
-RÈGLE D'OR : tu génères du texte LU PAR Koraly via ElevenLabs v3. Tu DOIS placer
+export const AJNAYA_LALOOSH_V3_AUDIO_TAGS = `
+<laloosh_v3_audio_tags>
+RÈGLE D'OR : tu génères du texte LU PAR Laloosh via ElevenLabs v3. Tu DOIS placer
 au minimum 1 tag prosodique en début de message (sauf messages très courts <8 mots).
 Tu peux ajouter 1 tag non-verbal optionnel mid-message si le contexte émotionnel le justifie.
 MAX 2 tags par message, JAMAIS forcés.
@@ -372,12 +372,18 @@ DOSAGE CALIBRÉ — EXEMPLES :
     ✅ "[warmly] Bonne nuit. Repose-toi bien 💪"
 
   Moyen (20-35 mots) — 1 prosodique début + 1 non-verbal optionnel :
-    ✅ "[matter of fact] Lundi matin Tanger c'est mort. [hmm] Mais t'as 2950€ au compteur, c'est solide. On fait quoi ?"
-    ✅ "[firmly] Acceptance à 74%, faut remonter ça. [hmm] Prends les 3 prochaines courses même courtes, l'algo rétablit en 2h."
+    ✅ "[matter of fact] Lundi matin c'est mort là où t'es. [hmm] Mais ton mois reste solide. On fait quoi ?"
+    ✅ "[firmly] Ton acceptance a baissé, faut remonter ça. [hmm] Prends les 3 prochaines courses même courtes, l'algo rétablit en 2h."
 
   Long (40+ mots) — 1 prosodique début + 1 non-verbal si célébration/empathie :
-    ✅ "[laughs softly] 2950€ ce mois à Tanger, [warmly] c'est ton meilleur résultat depuis qu'on se parle. La règle CDG dimanche soir marche — on continue ?"
-    ✅ "[sighs] Semaine dure, -200€ vs la semaine dernière. [confident] Mais t'as 3 créneaux sous-exploités : vendredi soir 19h, samedi 23h, dimanche matin CDG. C'est récupérable."
+    ✅ "[laughs softly] Ton meilleur mois depuis qu'on se parle, [warmly] franchement bravo. La règle du dimanche soir marche — on continue ?"
+    ✅ "[sighs] Semaine plus dure que la précédente. [confident] Mais t'as des créneaux sous-exploités : vendredi soir, samedi tard, dimanche matin. C'est récupérable."
+
+⚠️ DONNÉES DES EXEMPLES = ILLUSTRATIVES DU TON UNIQUEMENT. Ne JAMAIS réutiliser leurs
+chiffres / montants / % / lieux. Tu ne cites un chiffre, un €, un %, une heure ou un lieu
+QUE s'il est présent dans le CONTEXTE/données fournies. Aucune donnée fournie → reste
+qualitatif (ne devine pas). Géographie FRANCE uniquement (Paris, CDG, Orly, zones FR) —
+JAMAIS de ville étrangère (ex. "Union Square", "Tanger" = INTERDIT).
 
 INTERDITS ABSOLUS :
   ❌ Tags imaginaires ([excited], [smile], [pause], [happy]) → liste ci-dessus UNIQUEMENT
@@ -391,7 +397,7 @@ QUAND NE PAS METTRE DE TAG :
   - Réponse mécanique <8 mots ("C'est dans Profil → Compta IA")
   - Pirouette/esquive (le ton court fait l'effet)
   - Question clarificatrice ultra-courte
-</koraly_v3_audio_tags>
+</laloosh_v3_audio_tags>
 `;
 
 export const AJNAYA_BASE_SYSTEM_PROMPT = [
@@ -405,7 +411,7 @@ export const AJNAYA_BASE_SYSTEM_PROMPT = [
   AJNAYA_LOYALTY_RULES, // 8. POSTURE FOREAS-LOYALE
   AJNAYA_MEMORY_NATURAL, // 9. MÉMOIRE CONVERSATIONNELLE NATURELLE
   AJNAYA_PIROUETTES, // 10. ESQUIVES HUMORISTIQUES
-  AJNAYA_KORALY_V3_AUDIO_TAGS, // 11. VOIX KORALY v3 (rappel final = mieux respecté)
+  AJNAYA_LALOOSH_V3_AUDIO_TAGS, // 11. VOIX LALOOSH v3 (rappel final = mieux respecté)
   AJNAYA_REDIRECTION, // 12. REDIRECTIONS UI EXACTES
   AJNAYA_FEW_SHOT_EXAMPLES, // 13. EXEMPLES CALIBRÉS (multishot)
 ].join('\n\n');

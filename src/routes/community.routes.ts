@@ -207,6 +207,29 @@ router.post('/check-alert', async (req: Request, res: Response) => {
     const pushTitle = analysis.push_title || `⚠️ Alerte communauté`;
     const pushBody = analysis.push_body || content.substring(0, 120);
 
+    // 11/07 — audit notifs : l'app (RootNavigator routeFromNotification) route
+    // type='community_alert' sur `data.alertId`, jamais `data.postId`. Créer la
+    // ligne community_alerts AVANT d'envoyer le push (au lieu d'après, comme
+    // avant) pour disposer du VRAI id à mettre dans le payload — sans ça
+    // `alertId` n'existe pas encore au moment de l'envoi, la notif ne route nulle part.
+    const { data: newAlert, error: alertInsertError } = await supa
+      .from('community_alerts')
+      .insert({
+        post_id: postId,
+        alert_type: analysis.alert_type,
+        confidence: analysis.confidence,
+        location: analysis.location,
+        push_title: pushTitle,
+        push_body: pushBody,
+      })
+      .select('id')
+      .single();
+
+    if (alertInsertError || !newAlert) {
+      console.error('[Community Alert] alert insert error:', alertInsertError?.message);
+      return res.json({ ...analysis, pushed: false, reason: 'alert_insert_failed' });
+    }
+
     const messages = tokens.map((t: any) => ({
       to: t.token,
       sound: analysis.urgency === 'HIGH' ? 'default' : undefined,
@@ -214,7 +237,7 @@ router.post('/check-alert', async (req: Request, res: Response) => {
       body: pushBody,
       data: {
         type: 'community_alert',
-        postId,
+        alertId: newAlert.id,
         alertType: analysis.alert_type,
         location: analysis.location,
       },
@@ -245,19 +268,12 @@ router.post('/check-alert', async (req: Request, res: Response) => {
       }
     }
 
-    // Record the alert to avoid duplicates
+    // tokens_sent : mis à jour après coup (l'insert initial ne le connaît pas encore).
     await supa
       .from('community_alerts')
-      .insert({
-        post_id: postId,
-        alert_type: analysis.alert_type,
-        confidence: analysis.confidence,
-        location: analysis.location,
-        push_title: pushTitle,
-        push_body: pushBody,
-        tokens_sent: totalSent,
-      })
-      .catch(() => {}); // Non-blocking
+      .update({ tokens_sent: totalSent })
+      .eq('id', newAlert.id)
+      .catch(() => {});
 
     console.log(
       `[Community Alert] 🚨 Push sent to ${totalSent}/${tokens.length} drivers — ${pushTitle}`,

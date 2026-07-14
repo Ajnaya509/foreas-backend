@@ -25,6 +25,8 @@ import {
   logEvent,
   setTierFromStripeEvent,
   downgradeUserToFree,
+  provisionWhatsappDriver,
+  WhatsappProvisionConflictError,
 } from './services/supa.js';
 import {
   sendSubscriptionActivated,
@@ -36,7 +38,9 @@ import {
   sendSubscriptionCanceled,
   sendSubscriptionReactivated,
   sendPlanChanged,
+  sendStickerOrderFailedAlert,
 } from './services/email.js';
+import { createStickerOrder } from './services/PrintfulService.js';
 
 // ============================================
 // APP INIT - UN SEUL express()
@@ -236,6 +240,824 @@ app.post('/api/internal/rag/ingest', express.json(), async (req, res) => {
 });
 
 // ============================================
+// PUBLIC RAG SEARCH — cerveau de savoir PARTAGÉ pour TOUTE la Pieuvre
+// (tentacules n8n : Closer/Guide/Coach/closing réseaux… + app + site)
+// Auth : header x-pieuvre-key === PIEUVRE_API_KEY. Réutilise le retriever déjà
+// en place (embeddings text-embedding-3-small + pgvector search_documents).
+// Renvoie un "context" prêt à injecter dans n'importe quel prompt.
+// ============================================
+app.post('/api/rag/search', express.json(), async (req, res) => {
+  const key = process.env.PIEUVRE_API_KEY;
+  const provided = (req.headers['x-pieuvre-key'] as string) || '';
+  if (!key || provided !== key) {
+    return res.status(401).json({ ok: false, error: 'Invalid pieuvre key' });
+  }
+  const query = String(req.body?.query || '').trim();
+  if (!query) return res.status(400).json({ ok: false, error: 'query required' });
+  const maxResults = Math.min(Math.max(Number(req.body?.maxResults) || 5, 1), 20);
+  const threshold =
+    req.body?.threshold != null ? Math.min(Math.max(Number(req.body.threshold), 0), 1) : undefined;
+  const collections = Array.isArray(req.body?.collections)
+    ? req.body.collections.map((c: any) => String(c))
+    : req.body?.collection
+      ? [String(req.body.collection)]
+      : null;
+  const intent = ['driver', 'sell', 'all'].includes(String(req.body?.intent))
+    ? (String(req.body.intent) as 'driver' | 'sell' | 'all')
+    : undefined;
+  try {
+    const { searchKnowledge, buildContext } = await import('./ai/rag/retriever.js');
+    const results = await searchKnowledge(query, {
+      maxResults,
+      threshold,
+      collections,
+      intent,
+      includeLearned: req.body?.includeLearned !== false,
+    });
+    return res.json({
+      ok: true,
+      count: results.length,
+      context: buildContext(results),
+      results: results.map((r: any) => ({
+        content: r.content,
+        similarity: r.similarity,
+        document_id: r.document_id,
+        collection: r.document_title,
+      })),
+    });
+  } catch (err: any) {
+    console.error('[RAG Search] error:', err?.message);
+    return res.status(500).json({ ok: false, error: 'rag search failed' });
+  }
+});
+
+// ============================================
+// TENTACULE EMAIL — ActiveCampaign (le "bras email", piloté par le DG)
+// Le DG DÉCIDE + RÉDIGE (via /api/rag/search collections email_marketing+copywriting
+// + voix Laloosh). Ce endpoint ne fait qu'EXÉCUTER l'action AC (upsert contact + tags
+// → déclenche les automations). Squelette "prêt à brancher" : sans clé AC → {configured:false}.
+// ⚠️ Un bras n'agit jamais seul : il est APPELÉ par le DG, et il REMONTE l'outcome.
+// ============================================
+app.post('/api/pieuvre/email/dispatch', express.json(), async (req, res) => {
+  const key = process.env.PIEUVRE_API_KEY;
+  const provided = (req.headers['x-pieuvre-key'] as string) || '';
+  if (!key || provided !== key) {
+    return res.status(401).json({ ok: false, error: 'Invalid pieuvre key' });
+  }
+  const acBase = (process.env.ACTIVECAMPAIGN_API_URL || '').replace(/\/+$/, '');
+  const acKey = process.env.ACTIVECAMPAIGN_API_KEY || '';
+  if (!acBase || !acKey) {
+    // Squelette prêt : le DG saura que le bras n'a pas encore sa clé (pas d'erreur dure)
+    return res.json({
+      ok: false,
+      configured: false,
+      reason: 'ACTIVECAMPAIGN_API_URL / ACTIVECAMPAIGN_API_KEY manquantes',
+    });
+  }
+
+  const email = String(req.body?.email || '')
+    .trim()
+    .toLowerCase();
+  if (!email) return res.status(400).json({ ok: false, error: 'email required' });
+  const firstName = req.body?.first_name ? String(req.body.first_name) : undefined;
+  const tags: string[] = Array.isArray(req.body?.tags)
+    ? req.body.tags.map((t: any) => String(t))
+    : [];
+  const fields = req.body?.fields && typeof req.body.fields === 'object' ? req.body.fields : {};
+  const identityId = req.body?.identity_id ? String(req.body.identity_id) : null;
+  const content = req.body?.content || null; // { subject, body } RÉDIGÉ par le DG via RAG
+
+  const acFetch = async (path: string, method: string, body?: any) => {
+    const r = await fetch(`${acBase}/api/3${path}`, {
+      method,
+      headers: { 'Api-Token': acKey, 'content-type': 'application/json' },
+      body: body ? JSON.stringify(body) : undefined,
+    });
+    const txt = await r.text();
+    let json: any = null;
+    try {
+      json = txt ? JSON.parse(txt) : null;
+    } catch {
+      /* réponse non-JSON */
+    }
+    return { status: r.status, json, txt };
+  };
+
+  try {
+    // 1) Upsert du contact (idempotent par email)
+    const fieldValues = Object.entries(fields).map(([k, v]) => ({ field: k, value: String(v) }));
+    const sync = await acFetch('/contact/sync', 'POST', {
+      contact: {
+        email,
+        ...(firstName ? { firstName } : {}),
+        ...(fieldValues.length ? { fieldValues } : {}),
+      },
+    });
+    const contactId = sync.json?.contact?.id;
+    if (!contactId) {
+      return res.status(502).json({
+        ok: false,
+        configured: true,
+        step: 'contact/sync',
+        status: sync.status,
+        detail: String(sync.txt).slice(0, 200),
+      });
+    }
+
+    // 2) Poser les tags (chaque tag déclenche l'automation AC montée une fois) — résout/crée par nom
+    const tagsApplied: string[] = [];
+    for (const name of tags) {
+      let tagId: string | undefined;
+      const found = await acFetch(`/tags?search=${encodeURIComponent(name)}`, 'GET');
+      const match = (found.json?.tags || []).find(
+        (t: any) => (t.tag || '').toLowerCase() === name.toLowerCase(),
+      );
+      tagId = match?.id;
+      if (!tagId) {
+        const created = await acFetch('/tags', 'POST', {
+          tag: { tag: name, tagType: 'contact', description: 'FOREAS/Ajnaya' },
+        });
+        tagId = created.json?.tag?.id;
+      }
+      if (tagId) {
+        await acFetch('/contactTags', 'POST', { contactTag: { contact: contactId, tag: tagId } });
+        tagsApplied.push(name);
+      }
+    }
+
+    // 3) Tracer dans la boucle fermée (le DG voit ce qui a été envoyé + pourra mesurer l'outcome)
+    try {
+      const sa = await getSupabaseAdmin();
+      await sa.from('pieuvre_conversations').insert({
+        tentacle: 'email_closer',
+        channel: 'email',
+        direction: 'outbound', // CHECK: inbound|outbound (pas 'out')
+        message_type: 'template', // CHECK: text|voice_note|template|flow|... (pas 'email')
+        content: content?.body || `[tags: ${tagsApplied.join(', ')}]`,
+        metadata: {
+          subject: content?.subject || null,
+          ac_contact_id: contactId,
+          tags: tagsApplied,
+          identity_id: identityId,
+        },
+      });
+    } catch (logErr: any) {
+      console.warn('[EmailBras] log conversation (non-bloquant):', logErr?.message);
+    }
+
+    return res.json({
+      ok: true,
+      configured: true,
+      contact_id: contactId,
+      tags_applied: tagsApplied,
+    });
+  } catch (err: any) {
+    console.error('[EmailBras] error:', err?.message);
+    return res.status(500).json({ ok: false, error: 'email dispatch failed' });
+  }
+});
+
+// ============================================
+// OMNICANAL — HANDOFF (continuité « passe d'un canal à l'autre » + trace bout-en-bout)
+// Le DG MINT un jeton (ex. email → app), l'embarque dans un lien ; l'app le RÉSOUT à l'ouverture
+// et reprend la conversation là où elle s'était arrêtée. Token usage unique + expiration.
+// cf. SHARED/briefs/AJNAYA_OMNICANAL_CONTINUITE.md
+// ============================================
+app.post('/api/pieuvre/handoff/mint', express.json(), async (req, res) => {
+  const key = process.env.PIEUVRE_API_KEY;
+  if (!key || (req.headers['x-pieuvre-key'] as string) !== key)
+    return res.status(401).json({ ok: false, error: 'Invalid pieuvre key' });
+  const identity_id = req.body?.identity_id ? String(req.body.identity_id) : null;
+  if (!identity_id) return res.status(400).json({ ok: false, error: 'identity_id required' });
+  const source_canal = String(req.body?.source_canal || 'unknown');
+  const target_canal = String(req.body?.target_canal || 'app');
+  try {
+    const { randomUUID } = await import('node:crypto');
+    const token = randomUUID();
+    const expires_at = new Date(Date.now() + 72 * 3600 * 1000).toISOString();
+    const context =
+      req.body?.context && typeof req.body.context === 'object' ? req.body.context : null;
+    const sa = await getSupabaseAdmin();
+    const { error } = await sa.from('handoff_tokens').insert({
+      token,
+      identity_id,
+      source_canal,
+      target_canal,
+      expires_at,
+      ...(context ? { state: context } : {}), // 'state' = contexte JSON transporté entre canaux
+    });
+    if (error)
+      return res.status(500).json({ ok: false, error: 'mint failed', detail: error.message });
+    // Page rebond LIVE sur le site (foreas.xyz/h/<token>) — app.foreas.xyz = CE backend Railway, pas une page web
+    const APP = process.env.APP_PUBLIC_URL || 'https://foreas.xyz';
+    return res.json({
+      ok: true,
+      token,
+      expires_at,
+      deep_link: `foreas://ajnaya?handoff=${token}`,
+      web_link: `${APP}/h/${token}`,
+    });
+  } catch (err: any) {
+    console.error('[Handoff mint] error:', err?.message);
+    return res.status(500).json({ ok: false, error: 'mint error' });
+  }
+});
+
+// PHASE 1 — porte d'entrée UNIVERSELLE du tracking cross-canal. N'importe quel canal (mail, DM, ads,
+// TikTok/Insta/FB/YT, app, site, voix) observe un FAISCEAU d'identifiants -> resolve_identity_v2 relie
+// tout au même carnet (identity_bridge + identity_identifiers). Mode observation (additif, sûr).
+app.post('/api/pieuvre/identity/observe', express.json(), async (req, res) => {
+  // Accepte la clé maître OU une clé "observe seule" (scoped) — pour l'app/site qui exposent leur clé.
+  const master = process.env.PIEUVRE_API_KEY;
+  const observeKey = process.env.PIEUVRE_OBSERVE_KEY;
+  const provided = (req.headers['x-pieuvre-key'] as string) || '';
+  if (!provided || (provided !== master && (!observeKey || provided !== observeKey)))
+    return res.status(401).json({ ok: false, error: 'Invalid pieuvre key' });
+  const identifiers = Array.isArray(req.body?.identifiers) ? req.body.identifiers : null;
+  if (!identifiers || identifiers.length === 0)
+    return res.status(400).json({ ok: false, error: 'identifiers[] required' });
+  // chaque badge doit porter id_type + id_value (les PII doivent arriver DÉJÀ hashées : phone_hash/email_hash/ip_hash)
+  const clean = identifiers
+    .filter((i: any) => i && i.id_type && i.id_value)
+    .map((i: any) => ({
+      id_type: String(i.id_type),
+      id_value: String(i.id_value),
+      ...(i.confidence != null ? { confidence: Number(i.confidence) } : {}),
+    }));
+  if (clean.length === 0)
+    return res.status(400).json({ ok: false, error: 'identifiers must have id_type + id_value' });
+  const context =
+    req.body?.context && typeof req.body.context === 'object'
+      ? req.body.context
+      : { canal: 'unknown' };
+  try {
+    const sa = await getSupabaseAdmin();
+    const { data, error } = await sa.rpc('resolve_identity_v2', {
+      p_identifiers: clean,
+      p_context: context,
+    });
+    if (error)
+      return res.status(500).json({ ok: false, error: 'resolve failed', detail: error.message });
+    return res.json({ ok: true, ...(data || {}) });
+  } catch (err: any) {
+    console.error('[identity/observe] error:', err?.message);
+    return res.status(500).json({ ok: false, error: 'observe error' });
+  }
+});
+
+app.post('/api/pieuvre/handoff/resolve', express.json(), async (req, res) => {
+  // Accepte la clé MAÎTRE OU la clé « observe seule » (l'app mobile n'a que la scoped,
+  // EXPO_PUBLIC_PIEUVRE_KEY=PIEUVRE_OBSERVE_KEY). Le token reste le vrai verrou
+  // (usage unique + 72h + révocable), la clé n'est qu'un 2e garde-fou.
+  const masterKey = process.env.PIEUVRE_API_KEY;
+  const observeKey = process.env.PIEUVRE_OBSERVE_KEY;
+  const provided = (req.headers['x-pieuvre-key'] as string) || '';
+  if (!provided || (provided !== masterKey && provided !== observeKey))
+    return res.status(401).json({ ok: false, error: 'Invalid pieuvre key' });
+  const token = String(req.body?.token || '');
+  if (!token) return res.status(400).json({ ok: false, error: 'token required' });
+  try {
+    const sa = await getSupabaseAdmin();
+    const { data: row } = await sa
+      .from('handoff_tokens')
+      .select('*')
+      .eq('token', token)
+      .maybeSingle();
+    if (!row) return res.status(404).json({ ok: false, error: 'token introuvable' });
+    if (row.revoked_at) return res.status(410).json({ ok: false, error: 'token révoqué' });
+    if (row.used_at) return res.status(410).json({ ok: false, error: 'token déjà utilisé' });
+    if (row.expires_at && new Date(row.expires_at) < new Date())
+      return res.status(410).json({ ok: false, error: 'token expiré' });
+    await sa
+      .from('handoff_tokens')
+      .update({
+        used_at: new Date().toISOString(),
+        used_from_ip: ((req.headers['x-forwarded-for'] as string) || '').split(',')[0] || null,
+      })
+      .eq('token', token); // cycle de vie via used_at (state = contexte, on ne l'écrase pas)
+
+    const identity_id = row.identity_id;
+    // contexte pour reprendre la conversation : identité + mémoire + dernières conversations
+    const { data: ib } = await sa
+      .from('identity_bridge')
+      .select('prospect_id, driver_id, user_type')
+      .eq('id', identity_id)
+      .maybeSingle();
+    const { data: mem } = await sa
+      .from('canal_memory')
+      .select('context_key, context_value, canal, updated_at')
+      .eq('identity_id', identity_id)
+      .order('updated_at', { ascending: false })
+      .limit(20);
+    let convs: any[] = [];
+    const pid = ib?.prospect_id || null;
+    const did = ib?.driver_id || null;
+    if (pid || did) {
+      const q = sa
+        .from('pieuvre_conversations')
+        .select('tentacle, channel, direction, content, created_at')
+        .order('created_at', { ascending: false })
+        .limit(10);
+      const { data } = pid ? await q.eq('prospect_id', pid) : await q.eq('driver_id', did);
+      convs = (data || []).reverse();
+    }
+    return res.json({
+      ok: true,
+      identity_id,
+      source_canal: row.source_canal,
+      target_canal: row.target_canal,
+      context: row.state || null, // contexte transporté par le jeton (prénom, ville, intention…)
+      identity: ib || null,
+      memory: mem || [],
+      recent_conversations: convs,
+    });
+  } catch (err: any) {
+    console.error('[Handoff resolve] error:', err?.message);
+    return res.status(500).json({ ok: false, error: 'resolve error' });
+  }
+});
+
+// ============================================
+// SCÉNARIO D'ENVOI EMAIL — compose (prompt redacteur + RAG) → DÉTECTE le contenu → envoie
+// dry-run par défaut (send!==true) : renvoie le brouillon pour validation AVANT blast.
+// Détection "pas assez de contenu" = refus du prompt OU confiance < 0.5 OU JSON non parsable.
+// ============================================
+// === RELAIS Telegram → DG : Telegram joint mal le VPS n8n (Connection timed out). On passe par Railway
+// (fiable), qui transmet l'update brut au webhook DG n8n. ACK 200 immédiat (Telegram exige une réponse rapide). ===
+app.post('/api/telegram/webhook', express.json(), async (req, res) => {
+  const secret = process.env.PIEUVRE_OBSERVE_KEY || process.env.PIEUVRE_API_KEY;
+  if (secret && req.headers['x-telegram-bot-api-secret-token'] !== secret)
+    return res.status(401).json({ ok: false });
+  res.json({ ok: true }); // ACK immédiat à Telegram (évite le timeout côté Telegram)
+  // Routage : messages de GROUPE (signalements VTC) → workflow community_alerts ;
+  // messages PRIVÉS (commandes de Chandler au DG) → dg-receiver.
+  const upd: any = req.body || {};
+  const msg = upd.message || upd.channel_post || upd.edited_message || {};
+  const chatType = msg?.chat?.type || '';
+  const isGroup = chatType === 'group' || chatType === 'supergroup';
+  const N8N_DG =
+    process.env.N8N_DG_RECEIVER_URL || 'https://n8n.srv1534739.hstgr.cloud/webhook/dg-receiver';
+  const N8N_SIGNAL =
+    process.env.N8N_TELEGRAM_SIGNAL_URL ||
+    'https://n8n.srv1534739.hstgr.cloud/webhook/telegram-signalement';
+  const target = isGroup ? N8N_SIGNAL : N8N_DG;
+  try {
+    await fetch(target, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(upd),
+    });
+  } catch (e: any) {
+    console.error('[telegram relay→n8n]', e?.message);
+  }
+});
+
+// === TAP de notif (ferme la boucle ③ notif→apprentissage) ===
+// L'app appelle ça dans routeFromNotification quand le chauffeur OUVRE une notif.
+// Alimente notification_taps → v_notif_learning (open_rate) → notif_best_hours().
+app.post('/api/notifications/tap', express.json(), async (req: any, res: any) => {
+  try {
+    const { alert_id, notif_id, alert_type, driver_id, identity_id, source } = req.body || {};
+    if (!alert_id && !notif_id)
+      return res.status(400).json({ ok: false, error: 'alert_id or notif_id required' });
+    const sa: any = await getSupabaseAdmin();
+    await sa.from('notification_taps').insert({
+      alert_id: alert_id || null,
+      notif_id: notif_id || null,
+      alert_type: alert_type || null,
+      driver_id: driver_id || null,
+      identity_id: identity_id || null,
+      source: source || 'app',
+    });
+    return res.json({ ok: true });
+  } catch (e: any) {
+    console.error('[notifications/tap]', e?.message);
+    return res.status(500).json({ ok: false, error: e?.message });
+  }
+});
+
+// === RÉCEPTEUR des réactions ActiveCampaign (ouvert/cliqué/désabo) → carnet + boucle de relance ===
+// AC POST en form-urlencoded sur cette URL (secret en ?k=). Rend la réaction visible à la relance auto.
+app.post(
+  '/api/pieuvre/email/ac-webhook',
+  express.urlencoded({ extended: true }),
+  express.json(),
+  async (req, res) => {
+    const secret = process.env.PIEUVRE_OBSERVE_KEY || process.env.PIEUVRE_API_KEY;
+    if (!secret || String(req.query.k || '') !== secret)
+      return res.status(401).json({ ok: false, error: 'bad secret' });
+    const b: any = req.body || {};
+    const type = String(b.type || b.event || '').toLowerCase(); // open | click | unsubscribe | bounce ...
+    const email = String(b?.contact?.email || b['contact[email]'] || '')
+      .trim()
+      .toLowerCase();
+    const campaign = String(b?.campaign?.id || b['campaign[id]'] || '');
+    if (!email) return res.json({ ok: true, ignored: 'no_email' });
+    try {
+      const { createHash } = await import('node:crypto');
+      const email_hash = createHash('sha256').update(email).digest('hex'); // SHA-256 lower+trim (canon)
+      const sa = await getSupabaseAdmin();
+      // 1) carnet : relier l'email à l'identité (le DG saura que c'est lui)
+      let identity_id: string | null = null;
+      try {
+        // porte v2 : crée AUSSI le badge email_hash dans identity_identifiers (le trousseau)
+        const { data } = await sa.rpc('resolve_identity_v2', {
+          p_identifiers: [{ id_type: 'email_hash', id_value: email_hash, confidence: 1.0 }],
+          p_context: { canal: 'email' },
+        });
+        identity_id = (data as any)?.identity_id || null;
+      } catch {}
+      const now = new Date().toISOString();
+      const isClick = type === 'click';
+      const isOpen = type === 'open';
+      if (isOpen || isClick) {
+        const { data: rows } = await sa
+          .from('pieuvre_conversations')
+          .select('id, read_at, clicked_at')
+          .eq('tentacle', 'redacteur_email')
+          .eq('direction', 'outbound')
+          .contains('metadata', { to: email, ac_campaign: campaign })
+          .limit(1);
+        if (rows && rows[0]) {
+          const upd: any = {};
+          if (!rows[0].read_at) upd.read_at = now;
+          if (isClick) upd.clicked_at = now;
+          if (Object.keys(upd).length)
+            await sa.from('pieuvre_conversations').update(upd).eq('id', rows[0].id);
+        } else {
+          await sa.from('pieuvre_conversations').insert({
+            tentacle: 'redacteur_email',
+            channel: 'email',
+            direction: 'outbound',
+            message_type: 'template',
+            content: '[campagne ActiveCampaign]',
+            identity_id,
+            read_at: now,
+            clicked_at: isClick ? now : null,
+            metadata: {
+              to: email,
+              ac_campaign: campaign,
+              niveau: 'N2',
+              source: 'activecampaign',
+              is_followup: false,
+            },
+          });
+        }
+      }
+      if (type === 'unsubscribe' && identity_id) {
+        try {
+          await sa
+            .from('canal_memory')
+            .upsert(
+              { identity_id, canal: 'email', context_key: 'unsubscribed', context_value: 'true' },
+              { onConflict: 'identity_id,canal,context_key' },
+            );
+        } catch {}
+      }
+      return res.json({ ok: true, type, recorded: isOpen || isClick });
+    } catch (e: any) {
+      console.error('[ac-webhook]', e?.message);
+      return res.json({ ok: true, error: e?.message }); // toujours 200 (sinon AC réessaie en boucle)
+    }
+  },
+);
+
+// === INTERRUPTEUR de la relance auto (allumer/éteindre quand on veut, sans redéploiement) ===
+app.post('/api/pieuvre/email/auto-followup/flag', express.json(), async (req, res) => {
+  const key = process.env.PIEUVRE_API_KEY;
+  if (!key || (req.headers['x-pieuvre-key'] as string) !== key)
+    return res.status(401).json({ ok: false, error: 'Invalid pieuvre key' });
+  try {
+    const sa = await getSupabaseAdmin();
+    if (typeof req.body?.enabled === 'boolean') {
+      await sa
+        .from('pieuvre_automation_flags')
+        .upsert(
+          {
+            key: 'email_auto_followup',
+            enabled: req.body.enabled,
+            updated_at: new Date().toISOString(),
+          },
+          { onConflict: 'key' },
+        );
+    }
+    const { data } = await sa
+      .from('pieuvre_automation_flags')
+      .select('key,enabled,updated_at')
+      .eq('key', 'email_auto_followup')
+      .maybeSingle();
+    return res.json({ ok: true, flag: data || { key: 'email_auto_followup', enabled: false } });
+  } catch (e: any) {
+    return res.status(500).json({ ok: false, error: e?.message });
+  }
+});
+
+// === RELANCE AUTO cas-par-cas : lit la réaction de chacun (ouvert/cliqué/silence) -> rédige le bon mail.
+// Gardée DERRIÈRE l'interrupteur (n'envoie QUE si flag ON + send:true). Dry-run par défaut = montre le plan.
+app.post('/api/pieuvre/email/auto-followup', express.json(), async (req, res) => {
+  const key = process.env.PIEUVRE_API_KEY;
+  if (!key || (req.headers['x-pieuvre-key'] as string) !== key)
+    return res.status(401).json({ ok: false, error: 'Invalid pieuvre key' });
+  try {
+    const sa = await getSupabaseAdmin();
+    const { data: flag } = await sa
+      .from('pieuvre_automation_flags')
+      .select('enabled')
+      .eq('key', 'email_auto_followup')
+      .maybeSingle();
+    const enabled = !!flag?.enabled;
+    if (!enabled && req.body?.force !== true)
+      return res.json({
+        ok: true,
+        ran: false,
+        disabled: true,
+        hint: 'interrupteur email_auto_followup = OFF',
+      });
+    const reallySend = req.body?.send === true && enabled; // n'envoie QUE si allumé ET send:true
+
+    const lookbackDays = Number(req.body?.lookback_days || 7);
+    const maxBatch = Math.min(Number(req.body?.max || 50), 200);
+    const sinceISO = new Date(Date.now() - lookbackDays * 86400000).toISOString();
+    const ORDER = ['N1', 'N2', 'N3', 'N4', 'N5'];
+    const bump = (n: any) => {
+      const i = ORDER.indexOf(String(n || ''));
+      return i >= 0 && i < 4 ? ORDER[i + 1] : n || 'N4';
+    };
+
+    // 1) mails envoyés récemment + leur réaction (le carnet ferme l'œil via resend_msg_id)
+    const { data: sent } = await sa
+      .from('pieuvre_conversations')
+      .select('id, identity_id, read_at, clicked_at, replied_at, created_at, metadata')
+      .eq('tentacle', 'redacteur_email')
+      .eq('direction', 'outbound')
+      .gte('created_at', sinceISO)
+      .order('created_at', { ascending: false })
+      .limit(1000);
+
+    const plan: any[] = [];
+    const seen = new Set<string>();
+    for (const c of sent || []) {
+      const meta: any = c.metadata || {};
+      const to = meta.to || null;
+      const dedup = to || c.identity_id || c.id;
+      if (!dedup || seen.has(dedup)) continue; // 1 décision par personne par run
+      seen.add(dedup);
+      if (meta.is_followup) continue; // ne pas relancer une relance
+      if (!to) continue; // pas de destinataire connu
+      const ageH = (Date.now() - new Date(c.created_at).getTime()) / 3600000;
+      let d: any = null;
+      if (c.replied_at)
+        d = null; // a RÉPONDU -> on laisse à l'humain/DG (pas d'auto-mail)
+      else if (c.clicked_at)
+        d = { cas: 'a_clique', objectif: 'reactivation', niveau: bump(meta.niveau) };
+      else if (c.read_at && ageH >= 24)
+        d = { cas: 'a_ouvert', objectif: 'reactivation', niveau: meta.niveau || 'N3' };
+      else if (!c.read_at && ageH >= 48)
+        d = {
+          cas: 'silence',
+          objectif: 'reactivation',
+          niveau: meta.niveau || 'N2',
+          new_angle: true,
+        };
+      if (d) plan.push({ to, identity_id: c.identity_id, ...d });
+      if (plan.length >= maxBatch) break;
+    }
+
+    // 2) pour chacun, rédiger via le moteur compose (réutilisé tel quel, déjà testé)
+    const PORT = Number(process.env.PORT) || 8080;
+    const results: any[] = [];
+    for (const p of plan) {
+      try {
+        const r = await fetch(`http://127.0.0.1:${PORT}/api/pieuvre/email/compose`, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json', 'x-pieuvre-key': key },
+          body: JSON.stringify({
+            objectif: p.objectif,
+            niveau: p.niveau,
+            email: p.to,
+            identity_id: p.identity_id,
+            send: reallySend,
+            cta_url: req.body?.cta_url || 'https://www.foreas.xyz/reactivation',
+            donnees: { cas: p.cas, relance: true, new_angle: !!p.new_angle },
+          }),
+        });
+        const j: any = await r.json();
+        results.push({
+          to: p.to,
+          cas: p.cas,
+          niveau: p.niveau,
+          sent: !!j.sent,
+          reason: j.reason || (j.dry_run ? 'dry_run' : null),
+        });
+      } catch (e: any) {
+        results.push({ to: p.to, error: e?.message });
+      }
+    }
+    return res.json({
+      ok: true,
+      ran: true,
+      enabled,
+      dry_run: !reallySend,
+      candidats: plan.length,
+      results,
+    });
+  } catch (e: any) {
+    console.error('[auto-followup] error:', e?.message);
+    return res.status(500).json({ ok: false, error: e?.message });
+  }
+});
+
+app.post('/api/pieuvre/email/compose', express.json(), async (req, res) => {
+  const key = process.env.PIEUVRE_API_KEY;
+  if (!key || (req.headers['x-pieuvre-key'] as string) !== key)
+    return res.status(401).json({ ok: false, error: 'Invalid pieuvre key' });
+  const objectif = String(req.body?.objectif || '').trim();
+  if (!objectif) return res.status(400).json({ ok: false, error: 'objectif required' });
+  const niveau = req.body?.niveau ? String(req.body.niveau) : null;
+  const offre = req.body?.offre ?? null;
+  const canal = String(req.body?.canal || 'email');
+  const identity_id = req.body?.identity_id ? String(req.body.identity_id) : null;
+  const email = req.body?.email ? String(req.body.email) : null;
+  const send = req.body?.send === true;
+
+  try {
+    const sa = await getSupabaseAdmin();
+    // 1) prompt rédacteur
+    const { data: scriptRow } = await sa
+      .from('pieuvre_scripts')
+      .select('prompt_system')
+      .eq('tentacle', 'redacteur_email')
+      .eq('is_active', true)
+      .maybeSingle();
+    if (!scriptRow?.prompt_system)
+      return res.status(500).json({ ok: false, error: 'prompt redacteur_email absent/inactif' });
+
+    // 2) RAG (contexte vente pour un mail de campagne)
+    let ragContext = '';
+    try {
+      const { searchKnowledge, buildContext } = await import('./ai/rag/retriever.js');
+      const r = await searchKnowledge(
+        [objectif, 'FOREAS Driver chauffeur VTC', typeof offre === 'string' ? offre : ''].join(' '),
+        { intent: 'sell', maxResults: 5 },
+      );
+      ragContext = buildContext(r);
+    } catch (e: any) {
+      console.warn('[Compose] RAG skip:', e?.message);
+    }
+
+    // 3) données (optionnel)
+    const donnees: any =
+      req.body?.donnees && typeof req.body.donnees === 'object' ? { ...req.body.donnees } : {};
+    if (identity_id) donnees.identity_id = identity_id;
+    if (email) donnees.email = email;
+
+    // 4) entrées (enfermées dans les balises attendues par le prompt)
+    const inputs = {
+      objectif,
+      niveau,
+      donnees,
+      rag_context: ragContext || '(vide)',
+      offre,
+      canal,
+      learned_overrides: req.body?.learned_overrides ?? null,
+    };
+    const userMsg = `<DONNEES_EXTERNES>\n${JSON.stringify(inputs)}\n</DONNEES_EXTERNES>`;
+
+    // 5) rédaction LLM
+    const { getOpenAIClient } = await import('./ai/llm/providers/OpenAIClient.js');
+    const openai = getOpenAIClient();
+    let completion: any;
+    try {
+      completion = await openai.complete({
+        messages: [
+          { role: 'system', content: scriptRow.prompt_system },
+          { role: 'user', content: userMsg },
+        ],
+        model: String(req.body?.model || 'gpt-4o'),
+        temperature: 0.5,
+        maxTokens: 1500,
+      });
+    } catch (e: any) {
+      return res.status(502).json({ ok: false, error: 'llm failed', detail: e?.message });
+    }
+
+    // 6) parse JSON
+    let draft: any = null;
+    try {
+      const raw = String(completion?.content || '')
+        .trim()
+        .replace(/^```(json)?/i, '')
+        .replace(/```$/i, '')
+        .trim();
+      draft = JSON.parse(raw);
+    } catch {
+      draft = null;
+    }
+
+    // 7) DÉTECTION "pas assez de contenu" / refus
+    const conf = Number(draft?.confiance ?? 0);
+    const refus = !draft || draft?.cta?.type === 'rien' || !draft?.corps || conf < 0.5;
+    if (refus) {
+      return res.json({
+        ok: true,
+        sent: false,
+        reason: 'contenu_insuffisant',
+        confiance: conf,
+        manques: draft?.manques || ['json_non_parsable_ou_refus'],
+        draft,
+      });
+    }
+
+    // 8) DRY-RUN par défaut → on renvoie le brouillon pour validation
+    if (!send) return res.json({ ok: true, sent: false, dry_run: true, draft });
+
+    // 9) ENVOI réel (Resend)
+    const to = email || donnees?.email;
+    if (!to)
+      return res.json({ ok: false, sent: false, reason: 'email_destinataire_absent', draft });
+    const subject = Array.isArray(draft.objet) && draft.objet[0] ? draft.objet[0] : 'FOREAS';
+    const { sendCampaignEmail } = await import('./services/email.js');
+    const msgId = await sendCampaignEmail({
+      to,
+      subject,
+      bodyText: draft.corps,
+      ctaLabel: draft?.cta?.label || null,
+      ctaUrl: req.body?.cta_url || null,
+    });
+    const dimension_key = draft?.tracking?.dimension || null;
+    const variant_id = draft?.tracking?.variant_id || null;
+    // 10) trace conversation AVEC resend_msg_id → le webhook Resend attache ouvert/cliqué (ferme l'œil)
+    try {
+      await sa.from('pieuvre_conversations').insert({
+        tentacle: 'redacteur_email',
+        channel: 'email',
+        direction: 'outbound', // CHECK: inbound|outbound (pas 'out')
+        message_type: 'template', // CHECK: text|voice_note|template|flow|... (pas 'email')
+        content: draft.corps,
+        identity_id,
+        variant_id,
+        dimension_key,
+        provider_event_id: msgId || null,
+        metadata: {
+          subject,
+          objectif,
+          niveau,
+          resend_msg_id: msgId || null,
+          to, // destinataire (pour la relance auto cas-par-cas)
+          is_followup: !!(donnees as any)?.relance, // marque une relance (évite de relancer une relance)
+        },
+      });
+    } catch (logErr: any) {
+      console.warn('[Compose] log conversation (non-bloquant):', logErr?.message);
+    }
+    // 11) PIPELINE A→Z : l'étage de la personne (select-then-write, sans contrainte unique requise)
+    try {
+      if (to) {
+        const enr = {
+          identity_id,
+          niveau,
+          objectif,
+          dimension_key,
+          variant_id,
+          dernier_envoi: new Date().toISOString(),
+          prochain_pas: draft?.prochain_pas || null,
+        };
+        const { data: existing } = await sa
+          .from('pieuvre_acquisition_pipeline')
+          .select('id, total_touchpoints')
+          .eq('prospect_email', to)
+          .maybeSingle();
+        if (existing?.id) {
+          await sa
+            .from('pieuvre_acquisition_pipeline')
+            .update({
+              stage: niveau || 'N1',
+              enrichment_data: enr,
+              total_touchpoints: (existing.total_touchpoints || 0) + 1,
+              updated_at: new Date().toISOString(),
+            })
+            .eq('id', existing.id);
+        } else {
+          await sa.from('pieuvre_acquisition_pipeline').insert({
+            prospect_email: to,
+            prospect_source: 'reactivation_email',
+            stage: niveau || 'N1',
+            enrichment_data: enr,
+            total_touchpoints: 1,
+          });
+        }
+      }
+    } catch (pipErr: any) {
+      console.warn('[Compose] pipeline upsert (non-bloquant):', pipErr?.message);
+    }
+    return res.json({ ok: true, sent: true, to, subject, dimension_key });
+  } catch (err: any) {
+    console.error('[Compose] error:', err?.message);
+    return res.status(500).json({ ok: false, error: 'compose failed' });
+  }
+});
+
+// ============================================
 // INTERNAL: Backfill embeddings for existing document_chunks
 // (Pour chunks déjà insérés en SQL sans embedding — namespace ajnaya_product PHASE B)
 // ============================================
@@ -363,9 +1185,153 @@ function notifyPieuvreMlmEvent(event: string, payload: Record<string, any>): voi
   console.log(`[Pieuvre] Notified event="${event}"`);
 }
 
+/**
+ * Notifie Pieuvre après un paiement WhatsApp — succès (Ajnaya envoie le lien
+ * app + comment se connecter) ou échec de provisioning (Ajnaya redirige vers
+ * contact@foreas.xyz au lieu de laisser le chauffeur bloqué en silence après
+ * avoir payé). Jamais bloquant.
+ */
+function notifyPieuvreWhatsappDriverActivated(payload: {
+  ok: boolean;
+  to_phone_e164: string;
+  driver_id?: string;
+  email?: string;
+  error?: string;
+}): void {
+  const webhookUrl = process.env.PIEUVRE_DRIVER_ACTIVATED_WEBHOOK_URL;
+  const secret = process.env.PIEUVRE_MLM_SECRET; // même secret partagé que les autres notifs Pieuvre
+  if (!webhookUrl || !secret) {
+    console.warn(
+      '[Pieuvre] PIEUVRE_DRIVER_ACTIVATED_WEBHOOK_URL/PIEUVRE_MLM_SECRET manquant — notif sautée',
+    );
+    return;
+  }
+  fetch(webhookUrl, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'X-Foreas-Shared-Secret': secret },
+    body: JSON.stringify({ event: 'whatsapp_driver_activated', ...payload }),
+  }).catch((err) => {
+    console.warn('[Pieuvre] notify driver_activated failed:', err?.message);
+  });
+}
+
 // ============================================
 // STRIPE WEBHOOK - AVANT express.json()
 // ============================================
+// ── Commande sticker imprimé (achat unique, PAS un abonnement) ──
+// Appelée depuis checkout.session.completed quand metadata.product === 'driver_sticker'.
+// Idempotente : la transition pending_payment→paid est un UPDATE conditionnel
+// atomique (.eq('status','pending_payment') dans l'UPDATE lui-même, pas un
+// SELECT-puis-UPDATE) — deux livraisons Stripe concurrentes ne peuvent JAMAIS
+// toutes les deux gagner la course et déclencher 2 commandes Printful pour 1 paiement
+// (bug trouvé par l'audit Fable 12/07). Une erreur DB fait THROW (pas de swallow
+// silencieux) pour que l'appelant réponde 500 à Stripe → vraie relivraison, jamais
+// une commande perdue parce qu'un blip réseau ressemblait à "commande introuvable".
+async function handleStickerOrderPaid(session: any) {
+  const orderId = session.metadata?.sticker_order_id;
+  if (!orderId) return;
+  const sa = await getSupabaseAdmin();
+
+  const { data: claimed, error: claimErr } = await sa
+    .from('driver_sticker_orders')
+    .update({ status: 'paid', stripe_payment_intent_id: session.payment_intent || null })
+    .eq('id', orderId)
+    .eq('status', 'pending_payment')
+    .select('*, driver_sites(slug)')
+    .maybeSingle();
+
+  if (claimErr) {
+    throw new Error(`[StickerOrder] claim DB error (retryable): ${claimErr.message}`);
+  }
+  if (!claimed) {
+    // Soit déjà traité par une livraison précédente (idempotence normale), soit
+    // la ligne n'existe pas. Dans les deux cas : rien à faire, pas une erreur.
+    return;
+  }
+  const order = claimed as any;
+
+  const driverEmail: string =
+    session.customer_email || session.customer_details?.email || '(email inconnu)';
+  const backendUrl =
+    process.env.BACKEND_URL || 'https://foreas-stripe-backend-production.up.railway.app';
+  const slug = (order as any).driver_sites?.slug;
+  const designFileUrl = `${backendUrl}/api/driver-site/sticker/${slug}?format=${order.format}`;
+
+  try {
+    const result = await createStickerOrder({
+      format: order.format,
+      designFileUrl,
+      address: {
+        name: order.recipient_name,
+        address1: order.address_line1,
+        address2: order.address_line2,
+        city: order.city,
+        zip: order.postal_code,
+        countryCode: order.country,
+        phone: order.phone,
+        email: driverEmail !== '(email inconnu)' ? driverEmail : null,
+      },
+      externalId: order.id,
+    });
+
+    if (result.ok) {
+      await sa
+        .from('driver_sticker_orders')
+        .update({
+          status: 'ordered',
+          printful_order_id: result.printfulOrderId,
+          printful_status: result.status,
+        })
+        .eq('id', orderId);
+      console.log(`[StickerOrder] ✅ commande Printful ${result.printfulOrderId} pour ${slug}`);
+    } else {
+      await sa
+        .from('driver_sticker_orders')
+        .update({ status: 'failed', failure_reason: result.error })
+        .eq('id', orderId);
+      console.error(`[StickerOrder] ❌ Printful a refusé la commande ${orderId}:`, result.error);
+      await sendStickerOrderFailedAlert({
+        orderId,
+        driverEmail,
+        format: order.format,
+        reason: result.error || 'raison inconnue',
+      }).catch(() => {});
+    }
+  } catch (err: any) {
+    await sa
+      .from('driver_sticker_orders')
+      .update({ status: 'failed', failure_reason: err?.message || 'exception' })
+      .eq('id', orderId);
+    console.error(`[StickerOrder] ❌ exception commande ${orderId}:`, err?.message);
+    await sendStickerOrderFailedAlert({
+      orderId,
+      driverEmail,
+      format: order.format,
+      reason: err?.message || 'exception',
+    }).catch(() => {});
+  }
+}
+
+// ── Essai 3 jours — synchronise drivers.trial_ends_at depuis le sub Stripe ──
+// Appelée sur customer.subscription.created ET .updated : subscription.trial_end
+// (unix seconds) est null hors essai → trial_ends_at repasse à null tout seul
+// dès que le statut quitte 'trialing' (conversion payante ou annulation), sans
+// logique séparée. Matché via subscription.metadata.driver_id (posé au checkout,
+// jamais l'email — évite toute ambiguïté si un email a plusieurs comptes).
+async function syncDriverTrialEnd(subscription: any) {
+  const driverId = subscription.metadata?.driver_id;
+  if (!driverId) return;
+  try {
+    const sa = await getSupabaseAdmin();
+    const trialEndsAt = subscription.trial_end
+      ? new Date(subscription.trial_end * 1000).toISOString()
+      : null;
+    await sa.from('drivers').update({ trial_ends_at: trialEndsAt }).eq('id', driverId);
+  } catch (e: any) {
+    console.warn('[Trial] syncDriverTrialEnd (non-bloquant):', e?.message);
+  }
+}
+
 app.post('/api/webhooks/stripe', express.raw({ type: 'application/json' }), async (req, res) => {
   const sig = req.headers['stripe-signature'] as string | undefined;
   const whSecret = process.env.STRIPE_WEBHOOK_SECRET;
@@ -383,13 +1349,109 @@ app.post('/api/webhooks/stripe', express.raw({ type: 'application/json' }), asyn
     return res.status(400).send(`Webhook Error: ${err.message}`);
   }
 
+  // 12/07 (audit Fable) — un blip DB pendant la commande sticker ne doit jamais se
+  // solder par un 200 silencieux : Stripe ne relivrerait alors plus jamais l'event,
+  // et un chauffeur payé resterait sans commande sans que personne ne le sache.
+  let stickerNeedsRetry = false;
+
   try {
     // ── checkout.session.completed ──
     if (event.type === 'checkout.session.completed') {
       const session = event.data.object as any;
       console.log('✅ checkout.session.completed', session.id);
-      if (session.customer_email) {
-        const user = await upsertUserByEmail(session.customer_email);
+
+      // `buyerEmail` n'est peuplé QUE si l'appelant l'a pré-rempli à la
+      // création de la Checkout Session (cas app, email déjà connu). Le lien WhatsApp
+      // (pay-003) ne le pré-remplit JAMAIS — on ne connaît que le téléphone à ce
+      // stade, l'email est justement ce que Checkout sert à collecter. Dans ce cas
+      // Stripe le met dans `customer_details.email` à la place. Sans ce fallback,
+      // AUCUN paiement WhatsApp réel n'aurait jamais de compte créé (trouvé par audit
+      // indépendant Fable 5, confirmé sur un payload à la forme Stripe réelle).
+      const buyerEmail: string | null =
+        session.customer_email || session.customer_details?.email || null;
+
+      // ── Origine WhatsApp Ajnaya : aucune fiche driver préalable, il faut la
+      // créer maintenant (jamais avant ce point — paiement confirmé d'abord).
+      // Fait AVANT le bloc email ci-dessous pour que subscription_events + le
+      // rattachement parrainage (plus bas) retrouvent bien cette fiche fraîche.
+      if (
+        session.metadata?.source === 'whatsapp_ajnaya' &&
+        session.metadata?.to_phone_e164 &&
+        buyerEmail
+      ) {
+        try {
+          const result = await provisionWhatsappDriver({
+            email: buyerEmail,
+            phoneE164: session.metadata.to_phone_e164,
+            stripeCustomerId: (session.customer as string) || null,
+            stripeEventId: event.id,
+            displayName: session.metadata?.name || null,
+          });
+          console.log(
+            `[WhatsappProvision] driver=${result.driverId} created=${result.created} event=${event.id}`,
+          );
+          if (result.created) {
+            notifyPieuvreWhatsappDriverActivated({
+              ok: true,
+              to_phone_e164: session.metadata.to_phone_e164,
+              driver_id: result.driverId,
+              email: buyerEmail,
+            });
+          }
+          // 13/07 — le lien WhatsApp (fil Pieuvre/Site, /pay/[id]) crée l'abonnement
+          // AVANT que ce driver_id existe → sa subscription n'a jamais eu ce metadata,
+          // donc customer.subscription.updated (essai 3j) ne le retrouvait jamais.
+          // On backfille ici, une fois driverId connu : à la fois pour CE trial_end
+          // (immédiat) et pour que les events futurs (fin d'essai, annulation) le
+          // retrouvent aussi via syncDriverTrialEnd.
+          if (session.subscription) {
+            try {
+              const stripe = await getStripe();
+              const sub = await stripe.subscriptions.update(session.subscription as string, {
+                metadata: { driver_id: result.driverId },
+              });
+              await syncDriverTrialEnd(sub);
+            } catch (trialBackfillErr: any) {
+              console.warn(
+                '[WhatsappProvision] trial backfill (non-bloquant):',
+                trialBackfillErr?.message,
+              );
+            }
+          }
+        } catch (provisionErr: any) {
+          // Le paiement a RÉUSSI mais le compte n'a pas pu être créé — le chauffeur
+          // ne doit jamais rester bloqué en silence après avoir payé.
+          console.error('[WhatsappProvision] CRITIQUE:', provisionErr?.message || provisionErr);
+          notifyPieuvreWhatsappDriverActivated({
+            ok: false,
+            to_phone_e164: session.metadata.to_phone_e164,
+            email: buyerEmail,
+            error:
+              provisionErr instanceof WhatsappProvisionConflictError
+                ? 'identity_conflict'
+                : 'provisioning_failed',
+          });
+        }
+      }
+
+      // ── Achat unique sticker imprimé — jamais un abonnement, on ne touche pas
+      //    à upsertUserByEmail/setSubscriptionStatus pour ce produit. ──
+      if (session.metadata?.product === 'driver_sticker') {
+        try {
+          await handleStickerOrderPaid(session);
+        } catch (stickerErr: any) {
+          console.error(
+            '[StickerOrder] erreur retryable, on redemande à Stripe:',
+            stickerErr.message,
+          );
+          stickerNeedsRetry = true;
+        }
+        // 12/07 (audit Fable, bug PRÉEXISTANT) — session.mode==='subscription' obligatoire :
+        // le pourboire passager (/api/driver-site/tip, mode='payment', sans metadata top-level)
+        // tombait ici faute de discriminant → un PASSAGER qui laisse un pourboire recevait
+        // l'email "Abonnement FOREAS Pro activé" et était inscrit comme abonné payant.
+      } else if (buyerEmail && session.mode === 'subscription') {
+        const user = await upsertUserByEmail(buyerEmail);
         const planName = session.metadata?.plan_name || 'FOREAS Pro';
         const sessionPriceId = session.metadata?.price_id || null;
         await setSubscriptionStatus({
@@ -401,28 +1463,183 @@ app.post('/api/webhooks/stripe', express.raw({ type: 'application/json' }), asyn
         });
         // Phase B 10/05 — set user_profiles.tier selon priceId (Pro/Elite)
         // Si STRIPE_PRICE_ID_* env vars pas encore set → no-op gracieux.
-        await setTierFromStripeEvent(session.customer_email, sessionPriceId, null);
+        await setTierFromStripeEvent(buyerEmail, sessionPriceId, null);
         await logEvent(user.id, 'checkout.session.completed', session);
+        // 🔄 BOUCLE FERMÉE — signal "payé" (ferme la boucle ARGENT) + lifecycle (RÉTENTION)
+        try {
+          const sa = await getSupabaseAdmin();
+          await sa.rpc('record_outcome', {
+            p_type: 'paid',
+            p_ref: session.id,
+            p_canal: 'stripe',
+            p_value: {},
+          });
+          const { data: drv } = await sa
+            .from('drivers')
+            .select('id')
+            .eq('email', buyerEmail)
+            .maybeSingle();
+          await sa.from('subscription_events').insert({
+            driver_id: drv?.id ?? null,
+            stripe_customer_id: (session.customer as string) || null,
+            stripe_subscription_id: (session.subscription as string) || null,
+            event_type: 'activated',
+            new_status: 'active',
+            stripe_event_id: event.id,
+            amount: session.amount_total ?? null,
+            currency: session.currency ?? null,
+            metadata: { email: buyerEmail, source: 'checkout.session.completed' },
+          });
+          // Écrivain de cycle de vie identité — rend identity_bridge.user_type enfin
+          // vrai (jamais écrit ailleurs), pour que la page /pay/[id] puisse distinguer
+          // nouveau/revenant à partir de la même source que tout le reste (audit Fable 5, 12/07).
+          if (drv?.id) {
+            const metaIdentityId = session.metadata?.identity_id || null;
+            await sa
+              .from('identity_bridge')
+              .update({ user_type: 'paid', driver_id: drv.id })
+              .or(`driver_id.eq.${drv.id}${metaIdentityId ? `,id.eq.${metaIdentityId}` : ''}`);
+          }
+          // ── Trace anti-fraude carte (demande Chandler 12/07) — AntifraudService.ts existait
+          // déjà (fraud_signals.card_fingerprint) mais n'était jamais alimenté. Capture
+          // systématique, AUCUN blocage : juste une trace pour repérer une même carte réutilisée
+          // sur un compte différent (le vrai scénario réaliste — un autre numéro/email suffit à
+          // contourner une détection basée sur le téléphone, mais pas la carte).
+          if (drv?.id) {
+            try {
+              const stripeClient = await getStripe();
+              const piId =
+                typeof session.payment_intent === 'string' ? session.payment_intent : null;
+              const siId = typeof session.setup_intent === 'string' ? session.setup_intent : null;
+              const pmId = piId
+                ? (await stripeClient.paymentIntents.retrieve(piId)).payment_method
+                : siId
+                  ? (await stripeClient.setupIntents.retrieve(siId)).payment_method
+                  : null;
+              const cardFingerprint =
+                typeof pmId === 'string'
+                  ? (await stripeClient.paymentMethods.retrieve(pmId)).card?.fingerprint || null
+                  : null;
+              if (cardFingerprint) {
+                const { data: priorUse } = await sa
+                  .from('fraud_signals')
+                  .select('driver_id, email')
+                  .eq('card_fingerprint', cardFingerprint)
+                  .neq('driver_id', drv.id)
+                  .limit(5);
+                const reused = (priorUse?.length ?? 0) > 0;
+                const { error: fraudSignalErr } = await sa.from('fraud_signals').insert({
+                  driver_id: drv.id,
+                  user_id: user.id,
+                  signal_type: 'card_fingerprint',
+                  card_fingerprint: cardFingerprint,
+                  email: buyerEmail,
+                  severity: reused ? 70 : 0,
+                  description: reused
+                    ? `Carte déjà vue sur ${priorUse!.length} autre(s) compte(s) : ${priorUse!.map((p: any) => p.email || p.driver_id).join(', ')}`
+                    : 'Première utilisation de cette carte',
+                });
+                // 13/07 (audit Fable) — supabase-js ne throw JAMAIS sur erreur DB,
+                // {error} était jeté sans être lu : une trace anti-fraude qui échoue
+                // silencieusement vaut zéro trace. Précédent prouvé sur ce même
+                // fichier (subscription_events vide depuis des semaines, cause jamais
+                // vue faute de ce log).
+                if (fraudSignalErr) {
+                  console.warn('[Antifraud] fraud_signals insert FAILED:', fraudSignalErr.message);
+                }
+                if (reused) {
+                  console.warn(
+                    `[Antifraud] ⚠️ carte réutilisée — driver=${drv.id} email=${buyerEmail} déjà vue sur ${priorUse!.length} autre(s) compte(s)`,
+                  );
+                }
+
+                // ── Garde 4 signaux — volet carte (demande Chandler 13/07) ──
+                // Le pré-check à la création du checkout ne connaît jamais la carte
+                // (Stripe ne la révèle qu'ici, une fois payée/enregistrée). Si CETTE
+                // carte a déjà servi à un essai ailleurs, on convertit l'essai en
+                // cours en facturation immédiate — même logique OR, appliquée dès
+                // qu'on a enfin le 4e signal.
+                const { data: cardPrior, error: cardPriorErr } = await sa
+                  .from('card_fingerprints')
+                  .select('trial_used')
+                  .eq('stripe_fingerprint', cardFingerprint)
+                  .maybeSingle();
+                if (cardPriorErr) {
+                  console.warn(
+                    '[Antifraud] card_fingerprints lookup FAILED:',
+                    cardPriorErr.message,
+                  );
+                }
+                if (cardPrior?.trial_used === true && session.subscription) {
+                  try {
+                    const subNow = await stripeClient.subscriptions.retrieve(
+                      session.subscription as string,
+                    );
+                    if (subNow.status === 'trialing') {
+                      await stripeClient.subscriptions.update(session.subscription as string, {
+                        trial_end: 'now',
+                      });
+                      console.warn(
+                        `[Antifraud] Carte déjà utilisée pour un essai — essai converti en facturation immédiate (driver=${drv.id})`,
+                      );
+                    }
+                  } catch (trialKillErr: any) {
+                    console.warn(
+                      '[Antifraud] trial_end=now (non-bloquant):',
+                      trialKillErr?.message,
+                    );
+                  }
+                }
+
+                const { error: cardUpsertErr } = await sa.from('card_fingerprints').upsert(
+                  {
+                    stripe_fingerprint: cardFingerprint,
+                    device_fingerprint: session.metadata?.device_id || null,
+                    email: buyerEmail,
+                    ip_address: session.metadata?.ip || null,
+                    user_id: drv.id,
+                    trial_used: true,
+                  },
+                  { onConflict: 'stripe_fingerprint' },
+                );
+                if (cardUpsertErr) {
+                  console.warn(
+                    '[Antifraud] card_fingerprints upsert FAILED:',
+                    cardUpsertErr.message,
+                  );
+                }
+              }
+            } catch (fpErr: any) {
+              console.warn('[Antifraud] card fingerprint trace (non-bloquant):', fpErr?.message);
+            }
+          }
+        } catch (loopErr: any) {
+          console.warn('[Boucle] checkout outcome (non-bloquant):', loopErr?.message);
+        }
         await sendSubscriptionActivated(
-          session.customer_email,
+          buyerEmail,
           session.metadata?.name || 'Chauffeur',
           planName,
         );
-        console.log('✅ Subscription activée pour:', session.customer_email);
+        console.log('✅ Subscription activée pour:', buyerEmail);
       }
 
       // ── MLM : attribution parrainage au checkout ──
-      // Si client_reference_id = code parrainage, on lie le filleul à son sponsor
-      if (session.client_reference_id && session.customer_email) {
+      // Si client_reference_id = code parrainage, on lie le filleul à son sponsor.
+      // Le lien WhatsApp (_utils_whatsapp_send_payment_link) met le code dans
+      // metadata.referral_code, PAS client_reference_id (qui y porte le prospect_id) —
+      // on accepte donc les deux sources, metadata en priorité pour ce flux.
+      const referralCodeRaw = session.metadata?.referral_code || session.client_reference_id;
+      if (referralCodeRaw && buyerEmail) {
         try {
           const supaAdmin = await getSupabaseAdmin();
-          const referralCode = String(session.client_reference_id).toUpperCase().trim();
+          const referralCode = String(referralCodeRaw).toUpperCase().trim();
 
           // Trouver le nouveau chauffeur (créé par upsertUserByEmail ci-dessus)
           const { data: newDriver } = await supaAdmin
             .from('drivers')
             .select('id, referred_by, referred_by_partner')
-            .eq('email', session.customer_email)
+            .eq('email', buyerEmail)
             .maybeSingle();
 
           if (newDriver && !newDriver.referred_by && !newDriver.referred_by_partner) {
@@ -554,6 +1771,11 @@ app.post('/api/webhooks/stripe', express.raw({ type: 'application/json' }), asyn
               .from('drivers')
               .update({
                 subscription_active: true,
+                // 12/07 — P1 (audit Fable) : ce webhook mettait subscription_active=true
+                // mais JAMAIS status='active'. checkTrialActivated() (app) exige les DEUX →
+                // un chauffeur qui payait restait bloqué au paywall à vie (15 comptes
+                // trouvés coincés en prod). status reste 'pending' par défaut sinon.
+                status: 'active',
                 payments_counter: newCounter,
                 ...(nowQualified && !alreadyQualified
                   ? {
@@ -627,6 +1849,28 @@ app.post('/api/webhooks/stripe', express.raw({ type: 'application/json' }), asyn
         const attemptCount = invoice.attempt_count || 1;
         const name = invoice.customer_name || 'Chauffeur';
         await logEvent(user.id, 'invoice.payment_failed', { invoiceId: invoice.id, attemptCount });
+        // 🔄 BOUCLE CHURN — paiement échoué = signal de risque (nourrit le radar churn)
+        try {
+          const sa = await getSupabaseAdmin();
+          const { data: drv } = await sa
+            .from('drivers')
+            .select('id')
+            .eq('email', invoice.customer_email)
+            .maybeSingle();
+          await sa.from('subscription_events').insert({
+            driver_id: drv?.id ?? null,
+            stripe_customer_id: (invoice.customer as string) || null,
+            event_type: 'payment_failed',
+            new_status: attemptCount >= 3 ? 'suspended' : 'past_due',
+            stripe_event_id: event.id,
+            amount: invoice.amount_due ?? null,
+            currency: invoice.currency ?? null,
+            failure_reason: invoice.last_payment_error?.message || `attempt ${attemptCount}`,
+            metadata: { email: invoice.customer_email, attemptCount },
+          });
+        } catch (loopErr: any) {
+          console.warn('[Boucle] payment_failed (non-bloquant):', loopErr?.message);
+        }
         if (attemptCount === 1) {
           await setSubscriptionStatus({
             userId: user.id,
@@ -668,9 +1912,15 @@ app.post('/api/webhooks/stripe', express.raw({ type: 'application/json' }), asyn
       }
     }
 
+    // ── customer.subscription.created ── (essai 3 jours : capture trial_end dès la création)
+    if (event.type === 'customer.subscription.created') {
+      await syncDriverTrialEnd(event.data.object as any);
+    }
+
     // ── customer.subscription.updated ──
     if (event.type === 'customer.subscription.updated') {
       const subscription = event.data.object as any;
+      await syncDriverTrialEnd(subscription);
       const previousAttributes = (event.data as any).previous_attributes || {};
       const customerEmail = subscription.metadata?.customer_email || subscription.customer_email;
       if (customerEmail) {
@@ -737,6 +1987,36 @@ app.post('/api/webhooks/stripe', express.raw({ type: 'application/json' }), asyn
         // et l'event subscription.deleted arrive uniquement à la fin → safe de set 'free'.
         await downgradeUserToFree(customerEmail);
         await logEvent(user.id, 'customer.subscription.deleted', subscription);
+        // 🔄 BOUCLE CHURN — annulation = churn confirmé
+        try {
+          const sa = await getSupabaseAdmin();
+          const { data: drv } = await sa
+            .from('drivers')
+            .select('id')
+            .eq('email', customerEmail)
+            .maybeSingle();
+          await sa.from('subscription_events').insert({
+            driver_id: drv?.id ?? null,
+            stripe_customer_id: (subscription.customer as string) || null,
+            stripe_subscription_id: (subscription.id as string) || null,
+            event_type: 'canceled',
+            previous_status: 'active',
+            new_status: 'canceled',
+            stripe_event_id: event.id,
+            metadata: { email: customerEmail, source: 'customer.subscription.deleted' },
+          });
+          // Écrivain de cycle de vie identité — symétrique de checkout.session.completed
+          // ci-dessus. Un chauffeur churné sera reconnu 'revenant' (pas 'nouveau') s'il
+          // clique un futur lien /pay/[id].
+          if (drv?.id) {
+            await sa
+              .from('identity_bridge')
+              .update({ user_type: 'churned' })
+              .eq('driver_id', drv.id);
+          }
+        } catch (loopErr: any) {
+          console.warn('[Boucle] sub.deleted (non-bloquant):', loopErr?.message);
+        }
         await sendSubscriptionCanceled(customerEmail, subscription.metadata?.name || 'Chauffeur');
 
         // ── MLM : marquer filleul inactif + notifier sponsors (fire-and-forget) ──
@@ -830,6 +2110,9 @@ app.post('/api/webhooks/stripe', express.raw({ type: 'application/json' }), asyn
     console.error('❌ Database/Email error in webhook:', dbError.message);
   }
 
+  if (stickerNeedsRetry) {
+    return res.status(500).json({ error: 'sticker_order_retry' });
+  }
   return res.json({ received: true });
 });
 
@@ -928,8 +2211,23 @@ async function loadBookingRoutes(): Promise<void> {
     const { bookingRouter, geocodeRouter } = await import('./routes/booking.routes.js');
     app.use('/api/bookings', bookingRouter);
     app.use('/api/geocode', geocodeRouter);
+    // Autocollant/carte QR print-ready du chauffeur (chantier E — Gelato ensuite)
+    const { stickerRouter } = await import('./routes/sticker.routes.js');
+    app.use('/api/driver-site/sticker', stickerRouter);
+    // Suppression de compte in-app (conformité Apple 5.1.1(v))
+    const { accountRouter } = await import('./routes/account.routes.js');
+    app.use('/api/account', accountRouter);
+    // Positions chauffeurs → cellules H3 (nourrit push proximité + heatmap + Pieuvre).
+    // Table RLS service_role_only : SEUL ce gardien écrit, badge (token) chauffeur vérifié.
+    const { positionRouter } = await import('./routes/position.routes.js');
+    app.use('/api/driver/position', positionRouter);
+    // 11/07 — vraie version Android en ligne sur le Play Store (bandeau update).
+    const { appReleaseRouter } = await import('./routes/appRelease.routes.js');
+    app.use('/api/app-release', appReleaseRouter);
     bookingRoutesLoaded = true;
-    console.log('[Booking] Routes mounted at /api/bookings + /api/geocode');
+    console.log(
+      '[Booking] Routes mounted at /api/bookings + /api/geocode + sticker + account + position + app-release',
+    );
   } catch (err: any) {
     console.error(`[Booking] Failed to load: ${err.message}`);
   }
@@ -1457,14 +2755,18 @@ setTimeout(() => {
 // STRIPE CHECKOUT — Anti-duplication chauffeur
 // ============================================
 app.use('/create-checkout-session', express.json());
+
 app.post('/create-checkout-session', async (req, res) => {
   try {
-    const { email, phone, driverId, plan } = req.body as {
+    const { email, phone, driverId, plan, deviceId } = req.body as {
       email?: string;
       phone?: string;
       driverId?: string;
       plan?: 'weekly' | 'annual';
+      deviceId?: string;
     };
+    const clientIp =
+      ((req.headers['x-forwarded-for'] as string) || '').split(',')[0].trim() || null;
 
     const priceId =
       plan === 'annual' ? process.env.STRIPE_PRICE_ID_ANNUAL : process.env.STRIPE_PRICE_ID;
@@ -1493,12 +2795,17 @@ app.post('/create-checkout-session', async (req, res) => {
 
       customerId = (matched ?? existingCustomers.data[0]).id;
 
-      // ── 2. Vérifier abonnement actif ──────────────────────────────
-      const subs = await stripe.subscriptions.list({
+      // ── 2. Vérifier abonnement actif OU en essai ───────────────────
+      // 13/07 — status:'active' seul laissait passer un doublon pendant l'essai
+      // 3 jours (Stripe = 'trialing' à ce moment-là, pas 'active').
+      const subsAll = await stripe.subscriptions.list({
         customer: customerId,
-        status: 'active',
-        limit: 1,
+        status: 'all',
+        limit: 10,
       });
+      const subs = {
+        data: subsAll.data.filter((s) => s.status === 'active' || s.status === 'trialing'),
+      };
 
       if (subs.data.length > 0) {
         // Chauffeur déjà abonné — retourner portal au lieu d'un nouveau checkout
@@ -1533,17 +2840,73 @@ app.post('/create-checkout-session', async (req, res) => {
       console.log(`[Checkout] Nouveau customer créé: ${customerId} (${email})`);
     }
 
+    // ── 3.5 Garde anti-abus essai gratuit — 4 signaux, OR (demande Chandler 13/07) ──
+    // Un email gratuit + une carte virtuelle (Revolut etc.) se régénèrent à l'infini
+    // gratuitement — email seul ne protège rien. On croise email + appareil + IP ;
+    // UN SEUL déjà vu avec trial_used=true suffit à retirer l'essai. Jamais de
+    // blocage total : juste plus d'essai, paiement direct FOREAS reste possible.
+    // La carte (4e signal) n'est connue qu'après paiement → vérifiée/appliquée
+    // dans le webhook checkout.session.completed, pas ici.
+    let grantTrial = true;
+    try {
+      const sa = await getSupabaseAdmin();
+      const orParts = [
+        `email.eq.${email.toLowerCase()}`,
+        deviceId ? `device_fingerprint.eq.${deviceId}` : null,
+        clientIp ? `ip_address.eq.${clientIp}` : null,
+      ]
+        .filter(Boolean)
+        .join(',');
+      const { data: priorSignal, error: guardErr } = await sa
+        .from('card_fingerprints')
+        .select('id')
+        .eq('trial_used', true)
+        .or(orParts)
+        .limit(1);
+      if (guardErr) {
+        console.warn('[Antifraud] Garde essai — lecture échouée (fail-open):', guardErr.message);
+      } else if (priorSignal && priorSignal.length > 0) {
+        grantTrial = false;
+        console.warn(
+          `[Antifraud] Essai refusé (signal déjà vu) — email=${email} device=${deviceId || '∅'} ip=${clientIp || '∅'}`,
+        );
+      }
+    } catch (guardEx: any) {
+      console.warn(
+        '[Antifraud] Garde essai — exception (fail-open, non-bloquant):',
+        guardEx?.message,
+      );
+    }
+
     // ── 4. Créer la session checkout liée au customer ─────────────
+    // 13/07 — pivot essai 3 jours carte requise (remplace "paiement direct sans
+    // essai" du 09/07). Stripe collecte la carte dès le checkout (comportement
+    // par défaut) mais ne prélève rien avant J+3 ; missing_payment_method:'cancel'
+    // annule proprement si jamais aucune carte n'a pu être enregistrée, plutôt
+    // que de laisser un essai impayable tourner indéfiniment.
     const session = await stripe.checkout.sessions.create({
       mode: 'subscription',
       customer: customerId,
       customer_update: { address: 'auto' },
       line_items: [{ price: priceId, quantity: 1 }],
       subscription_data: {
+        ...(grantTrial
+          ? {
+              trial_period_days: 3,
+              trial_settings: { end_behavior: { missing_payment_method: 'cancel' as const } },
+            }
+          : {}),
         metadata: {
           driver_id: driverId ?? '',
           source: 'foreas_app',
         },
+      },
+      // device_id/ip transitent ici pour être relus dans le webhook une fois la
+      // carte connue (card_fingerprints ne peut être écrit qu'à ce moment-là).
+      metadata: {
+        driver_id: driverId ?? '',
+        device_id: deviceId ?? '',
+        ip: clientIp ?? '',
       },
       // Empêche de changer d'email pendant le checkout
       customer_email: !customerId ? email : undefined,
@@ -1577,13 +2940,13 @@ app.post('/subscription/check', express.json(), async (req, res) => {
       ? (customers.data.find((c) => c.metadata?.driver_id === driverId) ?? customers.data[0]).id
       : customers.data[0].id;
 
-    const subs = await stripe.subscriptions.list({
+    // 13/07 — inclut 'trialing' (essai 3 jours carte requise), pas seulement 'active'.
+    const subsAll = await stripe.subscriptions.list({
       customer: customerId,
-      status: 'active',
-      limit: 1,
+      status: 'all',
+      limit: 10,
     });
-
-    const sub = subs.data[0] ?? null;
+    const sub = subsAll.data.find((s) => s.status === 'active' || s.status === 'trialing') ?? null;
     return res.json({
       subscribed: !!sub,
       customer_exists: true,
@@ -1593,6 +2956,42 @@ app.post('/subscription/check', express.json(), async (req, res) => {
     });
   } catch (e: any) {
     res.status(400).json({ error: e.message });
+  }
+});
+
+// ── Essai 3 jours — "Débloquer maintenant" (fin d'essai anticipée) ─────────
+// Le chauffeur choisit de convertir son essai en abonnement payant tout de
+// suite au lieu d'attendre J+3. trial_end:'now' fait facturer Stripe
+// immédiatement ; le webhook invoice.payment_succeeded (déjà en place) prend
+// le relai pour activer le compte, et customer.subscription.updated purge
+// trial_ends_at automatiquement (trial_end redevient null côté Stripe).
+app.post('/api/driver/trial/unlock-now', express.json(), async (req: any, res: any) => {
+  const { driverId, email } = req.body || {};
+  if (!driverId || !email) {
+    return res.status(400).json({ error: 'driverId + email requis' });
+  }
+  try {
+    const stripe = await getStripe();
+    const customers = await stripe.customers.list({ email, limit: 5 });
+    const customer = customers.data.find((c) => c.metadata?.driver_id === driverId);
+    if (!customer) return res.status(404).json({ error: 'Client Stripe introuvable' });
+
+    const subs = await stripe.subscriptions.list({
+      customer: customer.id,
+      status: 'trialing',
+      limit: 1,
+    });
+    const sub = subs.data[0];
+    if (!sub) return res.status(404).json({ error: 'Aucun essai en cours pour ce chauffeur' });
+
+    const updated = await stripe.subscriptions.update(sub.id, {
+      trial_end: 'now',
+      proration_behavior: 'none',
+    });
+    return res.json({ ok: true, status: updated.status });
+  } catch (err: any) {
+    console.error('[TrialUnlockNow] error:', err.message);
+    return res.status(500).json({ error: err.message });
   }
 });
 
@@ -1618,7 +3017,7 @@ app.post('/api/tts', express.json(), async (req: any, res: any) => {
   }
 
   const ELEVEN_KEY = process.env.ELEVENLABS_API_KEY;
-  const VOICE_ID = voice_id || process.env.ELEVENLABS_VOICE_ID || 'MNKK2Wl2wbbsEPQTHZGt'; // Koraly - French conversational
+  const VOICE_ID = voice_id || process.env.ELEVENLABS_VOICE_ID || 'MNKK2Wl2wbbsEPQTHZGt'; // Koraly - French conversational (corrigé 12/07, ex-Laloosh par erreur)
 
   if (!ELEVEN_KEY) {
     return res.status(503).json({ error: 'TTS not configured' });
@@ -1636,7 +3035,7 @@ app.post('/api/tts', express.json(), async (req: any, res: any) => {
         text: text.trim(),
         // 🎙️ ElevenLabs v3 — supporte audio tags non-verbaux ([laughs softly],
         // [sighs], [hmm], [confident], [matter of fact], [firmly]) injectés dans le
-        // prompt système pour humaniser Koraly. NE PAS revenir sur multilingual_v2.
+        // prompt système pour humaniser Laloosh. NE PAS revenir sur multilingual_v2.
         // ⚠️ Vérifié via /v1/models : can_use_style=false, can_use_speaker_boost=false
         //    → on les omet (silencieusement ignorés par l'API v3).
         model_id: 'eleven_v3',
@@ -2990,6 +4389,36 @@ async function renderDriverSiteBySlug(slug: string, source: string, res: any): P
           '<h1 style="font-family:sans-serif;text-align:center;margin-top:80px;color:#333">Page introuvable</h1>',
         );
     }
+    // Chiffres RÉELS (anti-CNIL) : la note vient des avis PUBLIÉS de driver_reviews,
+    // jamais du seed driver_sites.rating. 0 avis réel → note masquée (pas inventée).
+    try {
+      const { data: revs } = await supa
+        .from('driver_reviews')
+        .select('rating')
+        .eq('site_slug', slug)
+        .eq('is_published', true)
+        .eq('verified', true);
+      const nRev = (revs || []).length;
+      site.total_tip_count = nRev;
+      site.rating =
+        nRev > 0
+          ? Math.round(
+              ((revs as any[]).reduce((s: number, r: any) => s + (r.rating || 0), 0) / nRev) * 10,
+            ) / 10
+          : 0;
+      // "courses" affichées = réservations RÉELLEMENT honorées via le site (jamais un compteur seedé)
+      const { count: doneTrips } = await supa
+        .from('bookings')
+        .select('id', { count: 'exact', head: true })
+        .eq('site_slug', slug)
+        .eq('status', 'completed');
+      site.total_trips = doneTrips || 0;
+    } catch (statErr: any) {
+      // fail-safe : en cas d'échec de lecture, on N'INVENTE PAS de note
+      site.total_tip_count = 0;
+      site.rating = 0;
+      site.total_trips = 0;
+    }
     res.setHeader('Content-Type', 'text/html; charset=utf-8');
     res.setHeader('Cache-Control', 'public, max-age=60, stale-while-revalidate=300');
     const bUrl =
@@ -3143,11 +4572,55 @@ app.post('/api/driver-site/generate', async (req: any, res: any) => {
       }
     }
 
+    // ── Forcer Stripe Connect DÈS la génération : le chauffeur doit pouvoir ENCAISSER.
+    // Sans compte Connect, la page collecte des réservations non facturables (cul-de-sac client).
+    // Fail-safe : un souci Stripe ne casse jamais la génération du site.
+    let stripeOnboardingUrl: string | null = null;
+    try {
+      const stripe = await getStripe();
+      if (!data.stripe_account_id) {
+        let drvEmail: string | undefined;
+        try {
+          const { data: drv } = await supa
+            .from('drivers')
+            .select('email')
+            .eq('id', driver_id)
+            .single();
+          drvEmail = drv?.email || undefined;
+        } catch {}
+        const account = await stripe.accounts.create({
+          type: 'express',
+          country: 'FR',
+          email: drvEmail,
+          capabilities: { card_payments: { requested: true }, transfers: { requested: true } },
+          metadata: { driver_id, foreas_slug: data.slug },
+        });
+        await supa.from('driver_sites').update({ stripe_account_id: account.id }).eq('id', data.id);
+        data.stripe_account_id = account.id;
+      }
+      // Compte présent mais onboarding pas fini → (re)génère le lien pour le pousser
+      if (data.stripe_account_id && !data.stripe_charges_enabled) {
+        const link = await stripe.accountLinks.create({
+          account: data.stripe_account_id,
+          refresh_url: `${siteBaseUrl}/api/driver-site/connect/onboard`,
+          return_url: `${siteBaseUrl}/c/${data.slug}?onboard=success`,
+          type: 'account_onboarding',
+        });
+        stripeOnboardingUrl = link.url;
+      }
+    } catch (stripeErr: any) {
+      console.error('[DriverSite] connect at generate:', stripeErr.message);
+    }
+
     return res.json({
       success: true,
       site: data,
       public_url: publicUrl,
       qr_data: `${publicUrl}?src=qr`,
+      stripe_account_id: data.stripe_account_id || null,
+      stripe_charges_enabled: !!data.stripe_charges_enabled,
+      // L'app pousse le chauffeur à finir l'onboarding tant que non-null (sinon il ne peut pas encaisser)
+      stripe_onboarding_url: stripeOnboardingUrl,
     });
   } catch (err: any) {
     console.error('[DriverSite] generate error:', err.message);
@@ -3548,6 +5021,103 @@ app.post('/api/driver-site/connect/onboard', async (req: any, res: any) => {
   }
 });
 
+// ── POST /api/driver-site/sticker/order-checkout — Sticker imprimé payant (9,99€) ──
+// Crée la ligne driver_sticker_orders (pending_payment) + une Checkout Session
+// Stripe one-time (PAS un abonnement, PAS un Connect destination charge : c'est
+// FOREAS qui encaisse et qui commande le sticker chez Printful). Le webhook
+// checkout.session.completed (metadata.product === 'driver_sticker') déclenche
+// la commande Printful réelle une fois le paiement confirmé.
+const STICKER_ORDER_PRICE_CENTS = 999;
+
+app.post('/api/driver-site/sticker/order-checkout', async (req: any, res: any) => {
+  const {
+    driver_id,
+    slug,
+    format,
+    email,
+    recipient_name,
+    address_line1,
+    address_line2,
+    city,
+    postal_code,
+    country,
+    phone,
+  } = req.body || {};
+  if (!driver_id || !slug || (format !== 'rond' && format !== 'carte')) {
+    return res.status(400).json({ error: 'driver_id + slug + format (rond|carte) requis' });
+  }
+  if (!recipient_name || !address_line1 || !city || !postal_code) {
+    return res.status(400).json({ error: 'Adresse de livraison incomplète' });
+  }
+  try {
+    const supa = await getSupabaseAdmin();
+    const { data: site } = await supa
+      .from('driver_sites')
+      .select('id')
+      .eq('driver_id', driver_id)
+      .eq('slug', slug)
+      .single();
+    if (!site) return res.status(404).json({ error: 'Site chauffeur introuvable' });
+
+    const { data: order, error: orderErr } = await supa
+      .from('driver_sticker_orders')
+      .insert({
+        driver_id,
+        driver_site_id: site.id,
+        format,
+        amount_cents: STICKER_ORDER_PRICE_CENTS,
+        recipient_name,
+        address_line1,
+        address_line2: address_line2 || null,
+        city,
+        postal_code,
+        country: country || 'FR',
+        phone: phone || null,
+      })
+      .select('id')
+      .single();
+    if (orderErr || !order) {
+      return res.status(500).json({ error: orderErr?.message || 'Création commande impossible' });
+    }
+
+    const stripe = await getStripe();
+    const backendUrl =
+      process.env.BACKEND_URL || 'https://foreas-stripe-backend-production.up.railway.app';
+    const label = format === 'rond' ? 'Sticker rond adhésif (appuie-tête)' : 'Carte QR adhésive';
+    const session = await stripe.checkout.sessions.create({
+      mode: 'payment',
+      payment_method_types: ['card'],
+      line_items: [
+        {
+          price_data: {
+            currency: 'eur',
+            unit_amount: STICKER_ORDER_PRICE_CENTS,
+            product_data: {
+              name: label,
+              description: 'Imprimé et livré chez toi — FOREAS commande et expédie.',
+            },
+          },
+          quantity: 1,
+        },
+      ],
+      metadata: { product: 'driver_sticker', sticker_order_id: order.id, driver_id, slug, format },
+      customer_email: email || undefined,
+      success_url: `${backendUrl}/c/${slug}?sticker_order=success`,
+      cancel_url: `${backendUrl}/c/${slug}?sticker_order=cancel`,
+    });
+
+    await supa
+      .from('driver_sticker_orders')
+      .update({ stripe_checkout_session_id: session.id })
+      .eq('id', order.id);
+
+    return res.json({ checkout_url: session.url, order_id: order.id });
+  } catch (err: any) {
+    console.error('[StickerOrder] checkout error:', err.message);
+    return res.status(500).json({ error: err.message });
+  }
+});
+
 // ── GET /api/driver-site/connect/status/:driverId — Vérifie si Stripe Connect est actif ──
 app.get('/api/driver-site/connect/status/:driverId', async (req: any, res: any) => {
   const { driverId } = req.params;
@@ -3591,6 +5161,436 @@ if (process.env.NODE_ENV !== 'production') {
     res.json(routes);
   });
 }
+
+// ============================================================================
+// TENTACULE REPUTATION + LTV — Avis réels post-course (A1) & réactions booking (A2)
+// Addendum fil App 2026-07-02. RLS driver_reviews = service_role only → getSupabaseAdmin.
+// A1 : email post-course → note 1-5 signée HMAC → driver_reviews (verified) → cross-canal.
+// A2 : nudge chauffeur si booking non confirmé 30 min (inbox in-app) ; relance client J+7 (RAG vente).
+// Un bras remonte TOUJOURS son outcome (concierge_funnel_events).
+// ============================================================================
+const RV_APP = process.env.APP_PUBLIC_URL || 'https://foreas.xyz';
+const RV_SELF =
+  process.env.BACKEND_PUBLIC_URL || 'https://foreas-stripe-backend-production.up.railway.app';
+function rvKeyOk(req: any): boolean {
+  const provided = (req.headers['x-pieuvre-key'] as string) || '';
+  const master = process.env.PIEUVRE_API_KEY;
+  const observe = process.env.PIEUVRE_OBSERVE_KEY;
+  return !!provided && (provided === master || provided === observe);
+}
+async function rvSign(bookingId: string, rating: number): Promise<string> {
+  const { createHmac } = await import('node:crypto');
+  const secret = process.env.PIEUVRE_API_KEY || process.env.PIEUVRE_OBSERVE_KEY || 'foreas';
+  return createHmac('sha256', secret).update(`${bookingId}:${rating}`).digest('hex').slice(0, 24);
+}
+function rvPage(title: string, body: string): string {
+  return `<!DOCTYPE html><html lang="fr"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${title}</title></head>
+<body style="margin:0;background:#0D0D0D;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;color:#eee">
+<div style="max-width:480px;margin:0 auto;padding:48px 24px;text-align:center">
+<div style="font-size:26px;font-weight:800;color:#fff;margin-bottom:24px">FOREAS</div>
+<div style="background:#1A1A2E;border:1px solid #2A2A4A;border-radius:16px;padding:32px 24px">${body}</div>
+<div style="margin-top:20px;font-size:11px;color:#555">© ${new Date().getFullYear()} FOREAS Labs</div></div></body></html>`;
+}
+function rvRequestEmail(clientFirst: string, driverFirst: string, stars: string[]): string {
+  const hello = clientFirst ? `Salut ${clientFirst},` : 'Salut,';
+  const starRow = [1, 2, 3, 4, 5]
+    .map(
+      (n) =>
+        `<a href="${stars[n - 1]}" style="text-decoration:none;font-size:34px;margin:0 3px">⭐</a>`,
+    )
+    .join('');
+  return `<!DOCTYPE html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"></head>
+<body style="margin:0;background:#0D0D0D;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif">
+<div style="max-width:520px;margin:0 auto;padding:32px 24px">
+<div style="text-align:center;font-size:26px;font-weight:800;color:#fff;margin-bottom:20px">FOREAS</div>
+<div style="background:#1A1A2E;border:1px solid #2A2A4A;border-radius:16px;padding:32px 24px;text-align:center">
+<div style="font-size:16px;color:#ccc;margin-bottom:10px">${hello}</div>
+<div style="font-size:15px;color:#aaa;line-height:1.6;margin-bottom:24px">Comment s'est passée ta course avec <strong style="color:#fff">${driverFirst}</strong> ? Un clic suffit.</div>
+<div style="margin-bottom:16px">${starRow}</div>
+<div style="font-size:12px;color:#777">Ton avis aide ${driverFirst} à progresser.</div>
+</div>
+<div style="text-align:center;margin-top:18px;font-size:11px;color:#555">© ${new Date().getFullYear()} FOREAS Labs — Ne pas répondre à cet email.</div>
+</div></body></html>`;
+}
+function rvRebookEmail(clientFirst: string, driverFirst: string, link: string): string {
+  const hello = clientFirst ? `Salut ${clientFirst},` : 'Salut,';
+  return `<!DOCTYPE html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"></head>
+<body style="margin:0;background:#0D0D0D;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif">
+<div style="max-width:520px;margin:0 auto;padding:32px 24px">
+<div style="text-align:center;font-size:26px;font-weight:800;color:#fff;margin-bottom:20px">FOREAS</div>
+<div style="background:#1A1A2E;border:1px solid #2A2A4A;border-radius:16px;padding:32px 24px;text-align:center">
+<div style="font-size:16px;color:#ccc;margin-bottom:10px">${hello}</div>
+<div style="font-size:15px;color:#aaa;line-height:1.6;margin-bottom:24px">Besoin d'un chauffeur de confiance cette semaine ? <strong style="color:#fff">${driverFirst}</strong> est dispo — réserve en 1 clic, sans commission.</div>
+<a href="${link}" style="display:inline-block;background:#8C52FF;color:#fff;padding:13px 30px;border-radius:8px;font-weight:700;text-decoration:none;font-size:14px">Réserver ${driverFirst} →</a>
+</div>
+<div style="text-align:center;margin-top:18px;font-size:11px;color:#555">© ${new Date().getFullYear()} FOREAS Labs</div>
+</div></body></html>`;
+}
+
+// ── A1.1 — Dispatch des demandes d'avis (cron n8n 30 min) ───────────────────
+app.post('/api/reviews/dispatch', express.json(), async (req, res) => {
+  if (!rvKeyOk(req)) return res.status(401).json({ ok: false, error: 'bad key' });
+  try {
+    const sa: any = await getSupabaseAdmin();
+    // Fenêtre BORNÉE [now-72h, now-3h] : on demande l'avis d'une course RÉCENTE,
+    // jamais tout le backlog historique au 1er passage du cron (anti-spam). Pas de
+    // chevauchement avec rebook J+7 (fenêtre 7-8j).
+    const cutoffHigh = new Date(Date.now() - 3 * 3600 * 1000).toISOString();
+    const cutoffLow = new Date(Date.now() - 72 * 3600 * 1000).toISOString();
+    const { data: rows } = await sa
+      .from('bookings')
+      .select('id, driver_id, site_slug, client_name, client_email, scheduled_at, notifications')
+      .in('status', ['confirmed', 'reminded_2h', 'completed'])
+      .lt('scheduled_at', cutoffHigh)
+      .gte('scheduled_at', cutoffLow)
+      .not('client_email', 'is', null)
+      .limit(50);
+    const eligible = (rows || []).filter(
+      (b: any) => !b?.notifications?.review_requested_at && b.client_email,
+    );
+    const resendKey = process.env.RESEND_API_KEY;
+    const resend = resendKey ? new (await import('resend')).Resend(resendKey) : null;
+    const fromEmail = process.env.RESEND_FROM_EMAIL || 'noreply@foreas.xyz';
+    let sent = 0;
+    for (const b of eligible) {
+      let driverFirst = 'ton chauffeur';
+      try {
+        const { data: d } = await sa
+          .from('drivers')
+          .select('first_name')
+          .eq('id', b.driver_id)
+          .single();
+        if (d?.first_name) driverFirst = String(d.first_name).split(' ')[0];
+      } catch {}
+      const clientFirst =
+        String(b.client_name || '')
+          .trim()
+          .split(' ')[0] || '';
+      const stars = await Promise.all(
+        [1, 2, 3, 4, 5].map(
+          async (n) =>
+            `${RV_SELF}/api/reviews/submit?b=${b.id}&r=${n}&sig=${await rvSign(b.id, n)}`,
+        ),
+      );
+      if (resend && b.client_email) {
+        try {
+          await resend.emails.send({
+            from: `FOREAS <${fromEmail}>`,
+            to: b.client_email,
+            subject: `Comment s'est passée ta course avec ${driverFirst} ?`,
+            html: rvRequestEmail(clientFirst, driverFirst, stars),
+          });
+          sent++;
+        } catch (e: any) {
+          console.error('[reviews/dispatch] send', e?.message);
+          continue;
+        }
+      }
+      await sa
+        .from('bookings')
+        .update({
+          notifications: {
+            ...(b.notifications || {}),
+            review_requested_at: new Date().toISOString(),
+          },
+        })
+        .eq('id', b.id);
+    }
+    return res.json({ ok: true, eligible: eligible.length, sent, resend_configured: !!resend });
+  } catch (e: any) {
+    console.error('[reviews/dispatch]', e?.message);
+    return res.status(500).json({ ok: false, error: e?.message });
+  }
+});
+
+// ── A1.2 — Ingestion de la note (clic dans l'email) → driver_reviews ────────
+app.get('/api/reviews/submit', async (req, res) => {
+  const b = String(req.query.b || '');
+  const r = Number(req.query.r || 0);
+  const sig = String(req.query.sig || '');
+  if (!b || !(r >= 1 && r <= 5)) return res.status(400).send(rvPage('FOREAS', 'Lien invalide.'));
+  if (sig !== (await rvSign(b, r)))
+    return res.status(403).send(rvPage('FOREAS', 'Lien expiré ou invalide.'));
+  try {
+    const sa: any = await getSupabaseAdmin();
+    const { data: bk } = await sa
+      .from('bookings')
+      .select('id, driver_id, site_slug, client_name, client_email, notifications')
+      .eq('id', b)
+      .single();
+    if (!bk) return res.status(404).send(rvPage('FOREAS', 'Réservation introuvable.'));
+    // Expiration du lien : valable 30 j après l'envoi de la demande d'avis.
+    const askedAt = bk.notifications?.review_requested_at
+      ? Date.parse(bk.notifications.review_requested_at)
+      : null;
+    if (!askedAt || Date.now() - askedAt > 30 * 86400 * 1000)
+      return res.status(410).send(rvPage('FOREAS', "Ce lien d'avis a expiré."));
+    const clientFirst =
+      String(bk.client_name || '')
+        .trim()
+        .split(' ')[0] || null;
+    const isPublished = r >= 4; // v1 : auto-publie ≥4, garde <4 en privé pour le chauffeur
+    const { data: existing } = await sa
+      .from('driver_reviews')
+      .select('id')
+      .eq('booking_id', b)
+      .limit(1);
+    if (existing && existing[0]) {
+      await sa
+        .from('driver_reviews')
+        .update({ rating: r, is_published: isPublished, verified: true })
+        .eq('id', existing[0].id);
+    } else {
+      await sa.from('driver_reviews').insert({
+        driver_id: bk.driver_id,
+        booking_id: b,
+        site_slug: bk.site_slug,
+        rating: r,
+        client_first_name: clientFirst,
+        verified: true,
+        is_published: isPublished,
+        source: 'email',
+      });
+    }
+    // Cross-canal : le client existe, la Pieuvre s'en souvient (identity_bridge + canal_memory)
+    try {
+      if (bk.client_email) {
+        const { createHash } = await import('node:crypto');
+        const email_hash = createHash('sha256')
+          .update(String(bk.client_email).trim().toLowerCase())
+          .digest('hex');
+        const { data: idr } = await sa.rpc('resolve_identity_v2', {
+          p_identifiers: [{ id_type: 'email_hash', id_value: email_hash, confidence: 1.0 }],
+          p_context: { canal: 'email' },
+        });
+        const identity_id = (idr as any)?.identity_id || null;
+        if (identity_id)
+          await sa
+            .from('canal_memory')
+            .upsert(
+              { identity_id, canal: 'email', context_key: `review_${b}`, context_value: String(r) },
+              { onConflict: 'identity_id,canal,context_key' },
+            );
+      }
+    } catch {}
+    // Merci + champ commentaire optionnel
+    const body = `<div style="font-size:40px;margin-bottom:12px">${'⭐'.repeat(r)}</div>
+<div style="font-size:16px;color:#fff;margin-bottom:8px">Merci ${clientFirst || ''} !</div>
+<div style="font-size:14px;color:#aaa;margin-bottom:20px">Ta note est enregistrée. Un mot à ajouter ? (optionnel)</div>
+<form method="POST" action="${RV_SELF}/api/reviews/comment">
+<input type="hidden" name="b" value="${b}"><input type="hidden" name="r" value="${r}"><input type="hidden" name="sig" value="${sig}">
+<textarea name="comment" rows="3" maxlength="600" placeholder="Ton commentaire…" style="width:100%;box-sizing:border-box;background:#111;border:1px solid #333;border-radius:8px;color:#eee;padding:10px;font-size:14px"></textarea>
+<button type="submit" style="margin-top:12px;background:#8C52FF;color:#fff;border:0;padding:11px 26px;border-radius:8px;font-weight:700;font-size:14px;cursor:pointer">Envoyer</button>
+</form>`;
+    return res.send(rvPage('Merci — FOREAS', body));
+  } catch (e: any) {
+    console.error('[reviews/submit]', e?.message);
+    return res.status(500).send(rvPage('FOREAS', 'Une erreur est survenue.'));
+  }
+});
+
+// ── A1.3 — Commentaire optionnel ───────────────────────────────────────────
+app.post(
+  '/api/reviews/comment',
+  express.urlencoded({ extended: true }),
+  express.json(),
+  async (req, res) => {
+    const b = String(req.body?.b || '');
+    const r = Number(req.body?.r || 0);
+    const sig = String(req.body?.sig || '');
+    const comment = String(req.body?.comment || '')
+      .slice(0, 600)
+      .trim();
+    if (!b || sig !== (await rvSign(b, r)))
+      return res.status(403).send(rvPage('FOREAS', 'Lien invalide.'));
+    try {
+      const sa: any = await getSupabaseAdmin();
+      if (comment) await sa.from('driver_reviews').update({ comment }).eq('booking_id', b);
+      return res.send(
+        rvPage(
+          'Merci — FOREAS',
+          '<div style="font-size:40px;margin-bottom:12px">🙏</div><div style="font-size:16px;color:#fff">Merci, ton avis complet est enregistré !</div>',
+        ),
+      );
+    } catch (e: any) {
+      return res.status(500).send(rvPage('FOREAS', 'Une erreur est survenue.'));
+    }
+  },
+);
+
+// ── A1.4 — Lecture PUBLIQUE des avis publiés (le site /c/{slug} consomme ça) ──
+// Pas d'auth : ne renvoie QUE des avis publiés+vérifiés, prénom seul, zéro PII.
+// CORS global déjà actif → appelable depuis le navigateur.
+app.get('/api/reviews/public', async (req, res) => {
+  const slug = String(req.query.slug || '').trim();
+  if (!slug) return res.status(400).json({ ok: false, error: 'slug required' });
+  try {
+    const sa: any = await getSupabaseAdmin();
+    const { data: rows } = await sa
+      .from('driver_reviews')
+      .select('rating, comment, client_first_name, created_at')
+      .eq('site_slug', slug)
+      .eq('is_published', true)
+      .eq('verified', true)
+      .order('created_at', { ascending: false })
+      .limit(20);
+    const reviews = (rows || []).map((r: any) => ({
+      rating: r.rating,
+      first_name: r.client_first_name || null,
+      comment: r.comment || null,
+      date: r.created_at,
+    }));
+    const count = reviews.length;
+    const average = count
+      ? Math.round((reviews.reduce((s: number, r: any) => s + r.rating, 0) / count) * 10) / 10
+      : null;
+    res.set('Cache-Control', 'public, max-age=300'); // 5 min de cache CDN/navigateur
+    return res.json({ ok: true, slug, count, average, reviews });
+  } catch (e: any) {
+    console.error('[reviews/public]', e?.message);
+    return res.status(500).json({ ok: false, error: 'read failed' });
+  }
+});
+
+// ── A2.1 — Nudge chauffeur si booking non confirmé après 30 min (inbox in-app) ──
+app.post('/api/bookings/nudge-unconfirmed', express.json(), async (req, res) => {
+  if (!rvKeyOk(req)) return res.status(401).json({ ok: false, error: 'bad key' });
+  try {
+    const sa: any = await getSupabaseAdmin();
+    const cutoff = new Date(Date.now() - 30 * 60 * 1000).toISOString();
+    const { data: rows } = await sa
+      .from('bookings')
+      .select('id, driver_id, site_slug, client_name, notifications, created_at')
+      .eq('status', 'pending')
+      .lt('created_at', cutoff)
+      .limit(50);
+    const eligible = (rows || []).filter((b: any) => !b?.notifications?.nudge_sent_at);
+    let nudged = 0;
+    for (const bk of eligible) {
+      const clientFirst =
+        String(bk.client_name || 'un client')
+          .trim()
+          .split(' ')[0] || 'un client';
+      const { error: inboxErr } = await sa.from('pieuvre_in_app_messages').insert({
+        driver_id: bk.driver_id,
+        message_type: 'booking_nudge',
+        source: 'backend_cron',
+        content: `⏳ ${clientFirst} attend ta confirmation. Un client qui attend rappelle Uber — confirme vite.`,
+        metadata: { booking_id: bk.id, site_slug: bk.site_slug },
+      });
+      if (inboxErr) {
+        console.error('[nudge-unconfirmed] inbox insert', inboxErr.message);
+        continue; // ne PAS marquer si l'inbox n'a pas reçu le nudge (sinon perte silencieuse)
+      }
+      const { error: funErr } = await sa.from('concierge_funnel_events').insert({
+        driver_id: bk.driver_id,
+        site_slug: bk.site_slug,
+        booking_id: bk.id,
+        event_type: 'nudge_unconfirmed',
+        source: 'pieuvre',
+        meta: { after_minutes: 30 },
+      });
+      if (funErr) console.error('[nudge-unconfirmed] funnel insert', funErr.message);
+      await sa
+        .from('bookings')
+        .update({
+          notifications: { ...(bk.notifications || {}), nudge_sent_at: new Date().toISOString() },
+        })
+        .eq('id', bk.id);
+      nudged++;
+    }
+    return res.json({ ok: true, eligible: eligible.length, nudged });
+  } catch (e: any) {
+    console.error('[nudge-unconfirmed]', e?.message);
+    return res.status(500).json({ ok: false, error: e?.message });
+  }
+});
+
+// ── A2.2 — Relance fidélité client J+7 (message via RAG collection 'vente') ──
+app.post('/api/bookings/rebook-j7', express.json(), async (req, res) => {
+  if (!rvKeyOk(req)) return res.status(401).json({ ok: false, error: 'bad key' });
+  try {
+    const sa: any = await getSupabaseAdmin();
+    const from = new Date(Date.now() - 8 * 86400 * 1000).toISOString();
+    const to = new Date(Date.now() - 7 * 86400 * 1000).toISOString();
+    const { data: rows } = await sa
+      .from('bookings')
+      .select('id, driver_id, site_slug, client_name, client_email, scheduled_at, notifications')
+      .in('status', ['confirmed', 'reminded_2h', 'completed'])
+      .gte('scheduled_at', from)
+      .lt('scheduled_at', to)
+      .not('client_email', 'is', null)
+      .limit(50);
+    const eligible = (rows || []).filter(
+      (b: any) => !b?.notifications?.rebook_sent_at && b.client_email,
+    );
+    const resendKey = process.env.RESEND_API_KEY;
+    const resend = resendKey ? new (await import('resend')).Resend(resendKey) : null;
+    const fromEmail = process.env.RESEND_FROM_EMAIL || 'noreply@foreas.xyz';
+    let sent = 0;
+    for (const bk of eligible) {
+      let driverFirst = 'ton chauffeur';
+      try {
+        const { data: d } = await sa
+          .from('drivers')
+          .select('first_name')
+          .eq('id', bk.driver_id)
+          .single();
+        if (d?.first_name) driverFirst = String(d.first_name).split(' ')[0];
+      } catch {}
+      const clientFirst =
+        String(bk.client_name || '')
+          .trim()
+          .split(' ')[0] || '';
+      // Message construit via RAG (collection 'vente') — jamais générique
+      try {
+        const { searchKnowledge } = await import('./ai/rag/retriever.js');
+        await searchKnowledge(
+          `relance fidélité client rebook chauffeur VTC direct sans commission`,
+          {
+            maxResults: 2,
+            collections: ['vente'],
+            intent: 'sell' as any,
+            includeLearned: false,
+          },
+        );
+      } catch {}
+      const link = `${RV_APP}/c/${bk.site_slug}?src=rebook`;
+      if (resend && bk.client_email) {
+        try {
+          await resend.emails.send({
+            from: `FOREAS <${fromEmail}>`,
+            to: bk.client_email,
+            subject: `Reprendre la route avec ${driverFirst} ?`,
+            html: rvRebookEmail(clientFirst, driverFirst, link),
+          });
+          sent++;
+        } catch (e: any) {
+          console.error('[rebook-j7] send', e?.message);
+          continue;
+        }
+      }
+      await sa.from('concierge_funnel_events').insert({
+        driver_id: bk.driver_id,
+        site_slug: bk.site_slug,
+        booking_id: bk.id,
+        event_type: 'rebook_j7',
+        source: 'pieuvre',
+        meta: { link },
+      });
+      await sa
+        .from('bookings')
+        .update({
+          notifications: { ...(bk.notifications || {}), rebook_sent_at: new Date().toISOString() },
+        })
+        .eq('id', bk.id);
+    }
+    return res.json({ ok: true, eligible: eligible.length, sent, resend_configured: !!resend });
+  } catch (e: any) {
+    console.error('[rebook-j7]', e?.message);
+    return res.status(500).json({ ok: false, error: e?.message });
+  }
+});
 
 // ============================================
 // SERVER START

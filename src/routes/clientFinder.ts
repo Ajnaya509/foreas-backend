@@ -262,4 +262,26 @@ router.post('/run/:driverId', async (req: Request, res: Response) => {
   }
 });
 
+// ── POST /scrape — déclenche Apify pour remplir places_directory (debug/admin) ──
+// Étape 0 de la pipeline (Apify → places_directory), en amont d'Apollo. Coûte
+// de l'argent réel (compte Apify) — protégé par la même service key que /run.
+router.post('/scrape', async (req: Request, res: Response) => {
+  const authHeader = req.headers.authorization;
+  const validKey = process.env.FOREAS_SERVICE_KEY;
+  if (!validKey || authHeader !== `Bearer ${validKey}`) {
+    return res.status(401).json({ error: 'Unauthorized' });
+  }
+
+  try {
+    const { scrapePlacesForFamily } = await import('../services/ApifyPlacesScraperService.js');
+    const family = (req.body?.family as string) || 'HOSPITALITY';
+    const city = (req.body?.city as string) || 'Paris';
+    const maxPerTerm = Number(req.body?.maxPerTerm) || 15;
+    const result = await scrapePlacesForFamily(family as any, city, maxPerTerm);
+    return res.json(result);
+  } catch (err: any) {
+    return res.status(500).json({ error: err.message });
+  }
+});
+
 export default router;

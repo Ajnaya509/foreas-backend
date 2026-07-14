@@ -1,4 +1,5 @@
 import { createClient, SupabaseClient } from '@supabase/supabase-js';
+import { createHash } from 'crypto';
 
 let _supaSrv: SupabaseClient | null = null;
 
@@ -169,15 +170,18 @@ export function getTierFromPriceId(priceId: string | null | undefined): UserTier
   if (!priceId) return null;
   const proWeekly = process.env.STRIPE_PRICE_ID_PRO_WEEKLY;
   const proAnnual = process.env.STRIPE_PRICE_ID_PRO_ANNUAL;
+  const proMonthly = process.env.STRIPE_PRICE_ID_PRO_MONTHLY; // Pricing 97€/mois (21/06/2026)
   const eliteWeekly = process.env.STRIPE_PRICE_ID_ELITE_WEEKLY;
   const eliteAnnual = process.env.STRIPE_PRICE_ID_ELITE_ANNUAL;
+  const eliteMonthly = process.env.STRIPE_PRICE_ID_ELITE_MONTHLY; // Pricing 247€/mois (21/06/2026)
 
-  if (priceId === proWeekly || priceId === proAnnual) return 'pro';
-  if (priceId === eliteWeekly || priceId === eliteAnnual) return 'elite';
+  if (priceId === proWeekly || priceId === proAnnual || priceId === proMonthly) return 'pro';
+  if (priceId === eliteWeekly || priceId === eliteAnnual || priceId === eliteMonthly)
+    return 'elite';
 
   // Pricing legacy (pre-Phase A 10/05) — reconnu pour rétrocompat audit
   // mais on ne migre pas automatiquement : ces customers restent sur leur ancien plan.
-  if (!proWeekly && !proAnnual && !eliteWeekly && !eliteAnnual) {
+  if (!proWeekly && !proAnnual && !proMonthly && !eliteWeekly && !eliteAnnual && !eliteMonthly) {
     console.warn(
       '[Supa] getTierFromPriceId: STRIPE_PRICE_ID_* env vars not set — Phase A script not yet executed by Chandler. Returning null (tier set skipped).',
     );
@@ -287,4 +291,172 @@ export async function logEvent(userId: string | null, type: string, payload: any
   } catch (err) {
     console.warn('[Supa] logEvent failed silently:', err);
   }
+}
+
+// =============================================================================
+// PROVISION CHAUFFEUR DEPUIS WHATSAPP — post-paiement Stripe (brief 11/07)
+// =============================================================================
+// upsertUserByEmail() suppose qu'une fiche `drivers` existe déjà (cas app :
+// inscription d'abord, paiement ensuite). Un chauffeur converti par Ajnaya sur
+// WhatsApp n'a JAMAIS de fiche préalable — il faut créer le compte Auth + la
+// fiche driver à partir de zéro, uniquement APRÈS confirmation du paiement.
+//
+// Connexion ensuite : par code SMS sur le même numéro (déjà vérifié vivant —
+// il vient de l'utiliser pour parler à Ajnaya). Pas de lien magique email : ce
+// mécanisme existe dans le code mais n'a aucun écran récepteur dans l'app.
+
+export class WhatsappProvisionConflictError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'WhatsappProvisionConflictError';
+  }
+}
+
+export interface WhatsappDriverProvisionResult {
+  driverId: string;
+  authUserId: string | null;
+  created: boolean;
+}
+
+export async function provisionWhatsappDriver(params: {
+  email: string;
+  phoneE164: string;
+  stripeCustomerId: string | null;
+  stripeEventId: string;
+  displayName?: string | null;
+}): Promise<WhatsappDriverProvisionResult> {
+  const email = params.email.trim().toLowerCase();
+  const phone = params.phoneE164.trim().replace(/\s+/g, '');
+
+  if (!email || !phone) {
+    throw new Error('provisionWhatsappDriver: email et phone requis');
+  }
+
+  // 1) Idempotence — une relivraison du même event Stripe (retry réseau, Stripe
+  // garantit "at-least-once") ne doit jamais reprovisionner. Vérifié AVANT toute écriture.
+  const { data: existingEvent } = await supaSrv
+    .from('subscription_events')
+    .select('driver_id')
+    .eq('stripe_event_id', params.stripeEventId)
+    .maybeSingle();
+  if (existingEvent?.driver_id) {
+    return { driverId: existingEvent.driver_id, authUserId: null, created: false };
+  }
+
+  // 2) Compte déjà existant (email OU phone) ? Ne jamais dupliquer.
+  const { data: existingDriver } = await supaSrv
+    .from('drivers')
+    .select('id, email, phone, auth_user_id')
+    .or(`phone.eq.${phone},email.eq.${email}`)
+    .maybeSingle();
+
+  if (existingDriver) {
+    const phoneMatches = existingDriver.phone === phone;
+    const emailMatches = (existingDriver.email || '').toLowerCase() === email;
+    if (phoneMatches && emailMatches) {
+      // Même personne (renouvellement, 2e achat) → réutiliser, ne pas recréer.
+      return {
+        driverId: existingDriver.id,
+        authUserId: existingDriver.auth_user_id,
+        created: false,
+      };
+    }
+    // Match partiel = suspect (numéro déjà lié à un AUTRE email, ou inversement) —
+    // ne JAMAIS fusionner silencieusement, laisser remonter pour revue manuelle.
+    throw new WhatsappProvisionConflictError(
+      `Conflit identité driver=${existingDriver.id} : phone_match=${phoneMatches} email_match=${emailMatches}`,
+    );
+  }
+
+  // 3) Créer le compte Auth — téléphone confirmé (vient de nous écrire dessus sur
+  // WhatsApp, c'est vivant) et email confirmé (collecté par Stripe pendant un vrai
+  // paiement carte, risque de fraude faible à ce stade du parcours).
+  //
+  // Trouvé en testant en direct (signature Stripe reconstituée à la main, aucun vrai
+  // paiement) : le trigger existant `on_auth_user_created` → handle_new_user() crée
+  // DÉJÀ automatiquement `users(id=auth.users.id)` PUIS `drivers(id=auth.users.id,
+  // last_active=now())` dès la création du compte Auth (+ behavior_models, user_karma).
+  // Il ne faut donc PAS ré-INSERT une ligne drivers ensuite (ça collisionne sur la
+  // clé primaire) — juste compléter par UPDATE la ligne que le trigger vient de poser.
+  const { data: authData, error: authErr } = await (supaSrv as any).auth.admin.createUser({
+    email,
+    phone,
+    email_confirm: true,
+    phone_confirm: true,
+    user_metadata: {
+      user_type: 'driver',
+      source: 'whatsapp_ajnaya',
+      stripe_customer_id: params.stripeCustomerId,
+      display_name: params.displayName || null,
+    },
+  });
+  if (authErr || !authData?.user) {
+    throw new Error(
+      `provisionWhatsappDriver: auth.admin.createUser a échoué — ${authErr?.message}`,
+    );
+  }
+
+  // 4) Compléter la fiche chauffeur auto-créée par le trigger (email/phone/statut).
+  const { data: driverRow, error: driverErr } = await supaSrv
+    .from('drivers')
+    .update({
+      auth_user_id: authData.user.id,
+      email,
+      phone,
+      first_name: params.displayName || null,
+      subscription_status: 'active',
+    })
+    .eq('id', authData.user.id)
+    .select('id')
+    .single();
+
+  if (driverErr) {
+    if ((driverErr as any).code === '23505') {
+      // Course concurrente gagnée par un autre appel (double webhook quasi simultané)
+      // — les index uniques drivers_phone_unique/drivers_email_unique ont bloqué le
+      // doublon. Récupérer la fiche qui vient d'être créée plutôt que planter.
+      const { data: raceDriver } = await supaSrv
+        .from('drivers')
+        .select('id, auth_user_id')
+        .or(`phone.eq.${phone},email.eq.${email}`)
+        .maybeSingle();
+      if (raceDriver) {
+        return { driverId: raceDriver.id, authUserId: raceDriver.auth_user_id, created: false };
+      }
+    }
+    // Compte Auth créé (et la ligne drivers bare posée par le trigger) mais le
+    // complément a raté — pas de rollback auto Supabase, log fort pour reprise
+    // manuelle plutôt que de laisser un Auth orphelin invisible.
+    console.error(
+      `[WhatsappProvision] CRITIQUE: auth user ${authData.user.id} créé mais update drivers a échoué:`,
+      driverErr.message,
+    );
+    throw new Error(`provisionWhatsappDriver: update drivers a échoué — ${driverErr.message}`);
+  }
+  if (!driverRow) {
+    throw new Error(
+      'provisionWhatsappDriver: update drivers sans erreur mais sans ligne retournée',
+    );
+  }
+
+  // 5) Fusionner avec le fil d'identité WhatsApp déjà existant (toutes les
+  // conversations qu'il a eues avec Ajnaya avant de payer) — best-effort, ne
+  // bloque jamais la création du compte si la RPC échoue.
+  try {
+    const phoneHash = createHash('sha256').update(phone).digest('hex');
+    const emailHash = createHash('sha256').update(email).digest('hex');
+    await supaSrv.rpc('resolve_identity_v2', {
+      p_identifiers: [
+        { id_type: 'phone_hash', id_value: phoneHash, confidence: 0.95 },
+        { id_type: 'wa_phone_hash', id_value: phoneHash, confidence: 0.95 },
+        { id_type: 'email_hash', id_value: emailHash, confidence: 0.9 },
+        { id_type: 'driver_id', id_value: driverRow.id, confidence: 0.99 },
+      ],
+      p_context: { canal: 'stripe_whatsapp' },
+    });
+  } catch (identityErr: any) {
+    console.warn('[WhatsappProvision] fusion identity_bridge non-bloquante:', identityErr?.message);
+  }
+
+  return { driverId: driverRow.id, authUserId: authData.user.id, created: true };
 }

@@ -15,7 +15,7 @@ async function send(params: {
   to: string | string[];
   subject: string;
   html: string;
-}) {
+}): Promise<string | null> {
   if (!resend) {
     console.warn(
       '[Email] RESEND_API_KEY manquante — email ignoré:',
@@ -23,10 +23,14 @@ async function send(params: {
       '→',
       params.to,
     );
-    return;
+    return null;
   }
-  const { error } = await resend.emails.send(params);
-  if (error) console.error('[Email] Erreur Resend:', error);
+  const { data, error } = await resend.emails.send(params);
+  if (error) {
+    console.error('[Email] Erreur Resend:', error);
+    return null;
+  }
+  return data?.id ?? null; // id Resend → permet au webhook d'attacher ouvert/cliqué
 }
 
 const FROM = 'FOREAS <noreply@foreas.xyz>';
@@ -76,6 +80,32 @@ function layout(title: string, body: string): string {
 </div>
 </body>
 </html>`;
+}
+
+// ── Campagne / mail composé par Ajnaya (corps texte → HTML brandé) ──
+export async function sendCampaignEmail(params: {
+  to: string;
+  subject: string;
+  bodyText: string;
+  ctaLabel?: string | null;
+  ctaUrl?: string | null;
+}) {
+  const esc = (s: string) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  const paras = params.bodyText
+    .split('\n')
+    .filter((l) => l.trim())
+    .map((l) => `<p>${esc(l)}</p>`)
+    .join('');
+  const cta =
+    params.ctaLabel && params.ctaUrl
+      ? `<a href="${params.ctaUrl}" class="cta">${esc(params.ctaLabel)}</a>`
+      : '';
+  return send({
+    from: FROM,
+    to: params.to,
+    subject: params.subject,
+    html: layout(params.subject, paras + cta),
+  });
 }
 
 // ── 1. Bienvenue (inscription) ──
@@ -396,6 +426,37 @@ export async function sendFraudAlert(data: {
   });
 }
 
+// ── 13.b Alerte commande sticker Printful échouée (chauffeur payé, rien envoyé) ──
+
+export async function sendStickerOrderFailedAlert(data: {
+  orderId: string;
+  driverEmail: string;
+  format: 'rond' | 'carte';
+  reason: string;
+}) {
+  return send({
+    from: FROM,
+    to: ADMIN_EMAIL,
+    subject: `[ACTION REQUISE] Sticker payé mais commande Printful échouée — ${data.driverEmail}`,
+    html: layout(
+      'Commande sticker en echec',
+      `
+      <div class="card alert">
+        <h1>Chauffeur paye, sticker non commande</h1>
+        <p><strong>Chauffeur :</strong> ${data.driverEmail}</p>
+        <p><strong>Format :</strong> ${data.format}</p>
+        <p><strong>Commande :</strong> ${data.orderId}</p>
+        <p><strong>Raison :</strong> <span class="highlight">${data.reason}</span></p>
+        <p style="margin-top:16px;font-size:13px;color:rgba(255,255,255,0.4)">
+          Le chauffeur a paye 9,99€ mais la commande Printful n'est pas partie automatiquement.
+          A traiter manuellement (driver_sticker_orders, statut "failed").
+        </p>
+      </div>
+    `,
+    ),
+  });
+}
+
 // ── 14. Parrainage valide ──
 
 export async function sendReferralValidated(
@@ -446,6 +507,58 @@ export async function sendCommissionPaid(
         <p>${firstName}, <span class="highlight">${amount}</span> ont ete verses sur ton ${method}.</p>
         <p>Le virement sera visible sous 2-3 jours ouvres. Continue a developper ton reseau FOREAS.</p>
         <a href="${APP_URL}" class="cta">Voir mon wallet</a>
+      </div>
+    `,
+    ),
+  });
+}
+
+// ── 16. Document legal verifie (Claude Vision) ──
+
+export async function sendDocumentVerified(email: string, name: string, docLabel: string) {
+  const firstName = name.split(' ')[0] || 'Chauffeur';
+
+  return send({
+    from: FROM,
+    to: email,
+    subject: `${docLabel} verifie — FOREAS`,
+    html: layout(
+      'Document verifie',
+      `
+      <div class="card success">
+        <h1>Document verifie</h1>
+        <p>${firstName}, ton document <span class="highlight">${docLabel}</span> a ete verifie et valide par Ajnaya.</p>
+        <p>Rien a faire de plus de ton cote pour ce document.</p>
+        <a href="${APP_URL}" class="cta">Voir mes documents</a>
+      </div>
+    `,
+    ),
+  });
+}
+
+// ── 17. Document legal a corriger (Claude Vision) ──
+
+export async function sendDocumentRejected(
+  email: string,
+  name: string,
+  docLabel: string,
+  reason: string,
+) {
+  const firstName = name.split(' ')[0] || 'Chauffeur';
+
+  return send({
+    from: FROM,
+    to: email,
+    subject: `${docLabel} a corriger — FOREAS`,
+    html: layout(
+      'Document a corriger',
+      `
+      <div class="card warning">
+        <h1>Document a corriger</h1>
+        <p>${firstName}, ton document <span class="highlight">${docLabel}</span> n'a pas pu etre valide.</p>
+        <p>Raison : ${reason}</p>
+        <p>Renvoie une nouvelle photo directement depuis l'app, dans Parametres puis Documents.</p>
+        <a href="${APP_URL}" class="cta">Corriger mon document</a>
       </div>
     `,
     ),

@@ -47,7 +47,9 @@ export function generateBio(
   const firstName = name.split(' ')[0];
   const langStr = languages.length > 1 ? languages.join(', ') : '';
   const tripsStr = trips > 50 ? `Fort de plus de ${trips} courses,` : '';
-  const ratingStr = rating >= 4.5 ? `noté ${rating.toFixed(1)}/5 par ses passagers,` : '';
+  // Truthful : pas de note « par ses passagers » sans vrais trajets (≥5).
+  const ratingStr =
+    rating >= 4.5 && trips >= 5 ? `noté ${rating.toFixed(1)}/5 par ses passagers,` : '';
 
   const nicheIntros: Record<string, string> = {
     corporate: `${firstName} est un chauffeur VTC spécialisé dans les déplacements professionnels à ${city}. ${tripsStr} ${ratingStr} il garantit ponctualité et discrétion pour vos rendez-vous d'affaires et transferts aéroport.`,
@@ -409,8 +411,11 @@ export function renderDriverPage(
   },
 ): string {
   const { backendUrl, stripePublishableKey, mapboxToken } = options;
-  const rating = site.rating || 5;
-  const stars = '★'.repeat(Math.round(rating)) + '☆'.repeat(5 - Math.round(rating));
+  // Note RÉELLE injectée par le handler (avg des avis publiés) — jamais un défaut inventé.
+  // Affichage gaté sur totalTipCount>0 plus bas ; 0 avis → "Nouveau sur FOREAS".
+  const rating = Number(site.rating) || 0;
+  const stars =
+    rating > 0 ? '★'.repeat(Math.round(rating)) + '☆'.repeat(5 - Math.round(rating)) : '';
   // v104 Sprint 3A — URL directe foreas.xyz/prenom-XX (plus de préfixe /c/)
   // Le backend conserve la route legacy /c/:slug pour rétro-compat.
   const siteUrl = `https://foreas.xyz/${site.slug}`;
@@ -1595,10 +1600,15 @@ input:focus { outline: none; border-color: var(--cyan); }
     <h1 class="hero-v2-title">${displayName}</h1>
     <div class="hero-v2-subline">${vehicleType} · ${city}${languages.length > 1 ? ' · ' + languages.join(', ') : ''}</div>
     <div class="hero-v2-rating">
-      <span class="stars" aria-label="Note ${rating.toFixed(1)} sur 5">${stars}</span>
+      ${
+        totalTipCount > 0
+          ? `<span class="stars" aria-label="Note ${rating.toFixed(1)} sur 5">${stars}</span>
       <span class="note">${rating.toFixed(1)}</span>
-      <span class="count">${totalTipCount > 0 ? totalTipCount + ' avis' : 'Nouveau sur FOREAS'}</span>
+      <span class="count">${totalTipCount} avis</span>`
+          : `<span class="count">✨ Nouveau sur FOREAS</span>`
+      }
     </div>
+    ${promoPercent > 0 ? `<div style="margin-top:10px;display:inline-block;background:rgba(16,185,129,0.15);border:1px solid rgba(16,185,129,0.5);color:#10B981;font-weight:700;font-size:13px;padding:6px 14px;border-radius:999px;">🎁 −${promoPercent}% sur ta 1ʳᵉ course</div>` : ''}
   </div>
   <div class="hero-scroll-hint">
     <svg viewBox="0 0 24 24" fill="none" stroke="rgba(255,255,255,0.7)" stroke-width="2" width="22" height="22"><polyline points="6 9 12 15 18 9"/></svg>
@@ -1632,8 +1642,8 @@ input:focus { outline: none; border-color: var(--cyan); }
   <div class="trust-badge" style="--i:2">
     <div class="trust-icon"><svg viewBox="0 0 24 24" fill="none" stroke="#FFD700" stroke-width="2"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/></svg></div>
     <div class="trust-text">
-      <div class="trust-val">${rating.toFixed(1)}</div>
-      <div class="trust-label">Note</div>
+      <div class="trust-val">${totalTipCount > 0 ? rating.toFixed(1) : 'Vérifié'}</div>
+      <div class="trust-label">${totalTipCount > 0 ? 'Note' : 'FOREAS'}</div>
     </div>
   </div>
   <div class="trust-badge" style="--i:3">

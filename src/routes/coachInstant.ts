@@ -209,14 +209,25 @@ function checkRateLimit(driverId: string): boolean {
 }
 
 // ── Zod schema ──────────────────────────────────────────────────
+// Coordonnée "souple" : le raccourci iOS peut sérialiser la position en NOMBRE ou en TEXTE,
+// éventuellement avec une virgule décimale FR ("48,8566"). On normalise → nombre, sinon undefined
+// (JAMAIS NaN qui ferait échouer TOUT le schéma et casserait le verdict live). audit Fable #2.
+const looseCoord = (min: number, max: number) =>
+  z.preprocess((v) => {
+    if (v === null || v === undefined || v === '') return undefined;
+    const n = typeof v === 'string' ? Number(v.replace(',', '.')) : Number(v);
+    return Number.isFinite(n) ? n : undefined;
+  }, z.number().min(min).max(max).optional());
+
 const InstantDecisionSchema = z.object({
   driverId: z.string().min(1),
   estimatedFare: z.number().min(0).max(1000),
   estimatedDistance: z.number().min(0).max(500),
   estimatedDuration: z.number().min(0).max(600),
   distanceToPickup: z.number().min(0).max(100),
-  driverLat: z.number().min(-90).max(90),
-  driverLng: z.number().min(-180).max(180),
+  // Position du chauffeur (raccourci iOS "Obtenir la position actuelle" / Android GPS).
+  driverLat: looseCoord(-90, 90),
+  driverLng: looseCoord(-180, 180),
   destinationLat: z.number().min(-90).max(90).optional(),
   destinationLng: z.number().min(-180).max(180).optional(),
   source: z.enum(['UBER', 'BOLT', 'HEETCH', 'FREENOW', 'MARCEL', 'LECAB', 'PRIVATE', 'OTHER']),
@@ -224,18 +235,110 @@ const InstantDecisionSchema = z.object({
   citySlug: z.string().optional(),
 });
 
+// ── iOS raccourci : parse le texte OCR brut d'une offre → champs structurés ──
+function parseRawCourse(text: string): Record<string, any> | null {
+  const t = String(text).replace(/\s+/g, ' ');
+  // Tarif : avec € / EUR, OU — si l'OCR iOS a loupé le symbole — un nombre à 2 décimales (ex. 28,50).
+  let fare: number | null = null;
+  const fareM =
+    t.match(/(\d{1,3})[.,](\d{2})\s*(?:€|eur|euros?)/i) || // 28,50 €
+    t.match(/(?:€|eur)\s*(\d{1,3})[.,](\d{2})/i) || // € 28,50
+    t.match(/(\d{1,3})[.,](\d{2})(?!\d)/); // 28,50  (secours OCR sans symbole)
+  if (fareM) fare = parseFloat(`${fareM[1]}.${fareM[2]}`);
+  if (fare == null) {
+    const intM = t.match(/(\d{1,3})\s*(?:€|eur)/i); // 28 € (entier)
+    if (intM) fare = parseFloat(intM[1]);
+  }
+  if (fare == null) return null;
+  // Distance de COURSE (pas « à 3 min (1.3 km) » = distance jusqu'au client) :
+  // on privilégie le mot « course », sinon la PLUS GRANDE distance (la course > l'approche).
+  let dist: number | null = null;
+  const courseM = t.match(/course[^0-9]{0,15}(\d{1,3})(?:[.,](\d))?\s*km/i);
+  if (courseM) {
+    dist = parseFloat(courseM[2] ? `${courseM[1]}.${courseM[2]}` : courseM[1]);
+  } else {
+    const re = /(\d{1,3})(?:[.,](\d))?\s*km/gi;
+    let km: RegExpExecArray | null;
+    let maxKm = 0;
+    while ((km = re.exec(t)) !== null) {
+      const v = parseFloat(km[2] ? `${km[1]}.${km[2]}` : km[1]);
+      if (v > maxKm) maxKm = v;
+    }
+    if (maxKm > 0) dist = maxKm;
+  }
+  if (dist == null || isNaN(dist)) dist = 5;
+  const lower = t.toLowerCase();
+  const source = lower.includes('uber')
+    ? 'UBER'
+    : lower.includes('bolt')
+      ? 'BOLT'
+      : lower.includes('heetch')
+        ? 'HEETCH'
+        : lower.includes('freenow') || lower.includes('free now')
+          ? 'FREENOW'
+          : 'OTHER';
+  return {
+    estimatedFare: fare,
+    estimatedDistance: dist,
+    // Durée réaliste : ville (≤20 km ~25 km/h) puis autoroute (~75 km/h) pour les longues courses.
+    estimatedDuration:
+      dist <= 20 ? Math.max(8, Math.round(dist * 2.4)) : Math.round(48 + (dist - 20) * 0.8),
+    distanceToPickup: 1,
+    // ⚠️ PAS de driverLat/Lng ici : l'OCR d'un screenshot ne contient AUCUN GPS.
+    // Le raccourci iOS envoie la VRAIE position du téléphone ("Obtenir la position
+    // actuelle") dans le body → on la garde (spread req.body). Jamais de Paris en dur
+    // qui écraserait la vraie zone (audit Fable : empoisonnait tous les events iOS).
+    source,
+  };
+}
+
+/** Jauge texte 8 segments : ▓▓▓░░░░░ */
+function gaugeBar(pct: number): string {
+  const p = Math.max(0, Math.min(100, pct));
+  const filled = Math.round((p / 100) * 8);
+  return '▓'.repeat(filled) + '░'.repeat(8 - filled);
+}
+
 // ── POST /instant-decision ──────────────────────────────────────
 router.post('/instant-decision', async (req: Request, res: Response) => {
   const start = Date.now();
 
+  // iOS raccourci détecté si rawText présent → on répond en TEXTE BRUT (1 ligne prête)
+  // au lieu de JSON, pour que « Afficher la notification » lise direct « Contenu de l'URL ».
+  const fromShortcut = typeof req.body?.rawText === 'string';
+
+  // iOS raccourci : si on reçoit le texte OCR brut, on le parse en champs structurés
+  // (Android continue d'envoyer les champs structurés → ce bloc ne s'exécute pas pour lui).
+  if (typeof req.body?.rawText === 'string' && req.body.estimatedFare == null) {
+    const fromText = parseRawCourse(req.body.rawText);
+    if (!fromText)
+      return res
+        .status(200)
+        .type('text/plain')
+        .send("⚠️ Offre illisible — reprends la capture de l'offre");
+    req.body = { ...req.body, ...fromText };
+  }
+
   const parsed = InstantDecisionSchema.safeParse(req.body);
   if (!parsed.success) {
-    return res.status(400).json({ error: 'Invalid input', details: parsed.error.issues });
+    if (fromShortcut)
+      return res.status(200).type('text/plain').send('⚠️ Données de course invalides');
+    return res
+      .status(400)
+      .json({
+        error: 'Invalid input',
+        details: parsed.error.issues,
+        notif: '⚠️ Données de course invalides',
+      });
   }
   const body = parsed.data;
 
   if (!checkRateLimit(body.driverId)) {
-    return res.status(429).json({ error: 'Too many requests' });
+    if (fromShortcut)
+      return res.status(200).type('text/plain').send('⏳ Trop de demandes — réessaie dans 1 min');
+    return res
+      .status(429)
+      .json({ error: 'Too many requests', notif: '⏳ Trop de demandes — réessaie dans 1 min' });
   }
 
   try {
@@ -255,8 +358,21 @@ router.post('/instant-decision', async (req: Request, res: Response) => {
       const destH3 = h3.latLngToCell(body.destinationLat, body.destinationLng, 9);
       destH3Parent = h3.cellToParent(destH3, 8);
     }
-    // Zone de départ du chauffeur (signal "fuir zone morte / rester zone chaude")
-    const originH3 = h3.cellToParent(h3.latLngToCell(body.driverLat, body.driverLng, 9), 8);
+    // Zone de départ du chauffeur (signal "fuir zone morte / rester zone chaude").
+    // pickupH3 (res 9, ~150 m) = zone stockée pour Chronos ; originH3 (res 8) = scoring.
+    // Calculés UNIQUEMENT si on a une VRAIE position (jamais depuis un Paris bidon).
+    // 0 sur un axe = échec de localisation / champ vide → PAS une vraie zone. Le GPS réel ne
+    // renvoie jamais exactement 0.000000 pour un chauffeur → évite les hexagones null-island/équateur.
+    // audit Fable #5.
+    const hasDriverGeo =
+      body.driverLat != null &&
+      body.driverLng != null &&
+      body.driverLat !== 0 &&
+      body.driverLng !== 0;
+    const pickupH3 = hasDriverGeo
+      ? h3.latLngToCell(body.driverLat as number, body.driverLng as number, 9)
+      : null;
+    const originH3 = pickupH3 ? h3.cellToParent(pickupH3, 8) : null;
 
     // 3. Phase 1 — toutes les requêtes en parallèle
     const [zoneResult, prefsResult, ridesResult, profileResult, cityProfile, originZoneRaw] =
@@ -281,7 +397,7 @@ router.post('/instant-decision', async (req: Request, res: Response) => {
           .eq('user_id', body.driverId)
           .single(),
         getCityProfile(body.citySlug ?? 'paris'),
-        getZoneScore(originH3).catch(() => null),
+        originH3 ? getZoneScore(originH3).catch(() => null) : Promise.resolve(null),
       ]);
 
     // 4. Vehicle × ville — référentiel de base
@@ -489,6 +605,15 @@ router.post('/instant-decision', async (req: Request, res: Response) => {
       .insert({
         driver_id: body.driverId,
         source_platform: body.source,
+        // Colonnes CANONIQUES lues par la vue de demande (v_demand_h3_hourly) : on remplit
+        // platform+fare_proposed EN PLUS, pour que CE chemin (iOS + coach Android) alimente
+        // aussi la carte de demande, pas seulement /screen-reader-event.
+        // ⚠️ platform DOIT rester dans le CHECK live ('uber'|'bolt'|'heetch'|'other') sinon
+        // l'INSERT ENTIER échoue en silence (fire-and-forget) → event perdu. audit Fable #1.
+        platform: ['uber', 'bolt', 'heetch'].includes(String(body.source).toLowerCase())
+          ? String(body.source).toLowerCase()
+          : 'other',
+        fare_proposed: body.estimatedFare,
         estimated_fare: body.estimatedFare,
         net_fare: netFare,
         distance_to_pickup: body.distanceToPickup,
@@ -499,6 +624,14 @@ router.post('/instant-decision', async (req: Request, res: Response) => {
         vehicle_category: vehicleCategory,
         eur_hour_reference: finalEurHourRef,
         accept_threshold_used: finalAcceptThreshold,
+        // Géo + temps → indexe la demande par zone×heure (carburant Chronos).
+        // pickup_h3/lat/lon = null si aucune vraie position (jamais de Paris bidon).
+        // null si pas de vraie zone (jamais 0/0 stocké → pas de null-island au recalcul). audit Fable #3.
+        pickup_lat: hasDriverGeo ? body.driverLat : null,
+        pickup_lon: hasDriverGeo ? body.driverLng : null,
+        pickup_h3: pickupH3,
+        day_of_week: dayOfWeek,
+        hour_of_day: hour,
         created_at: new Date().toISOString(),
       })
       .then(
@@ -506,21 +639,47 @@ router.post('/instant-decision', async (req: Request, res: Response) => {
         (e: any) => console.error('[CoachLog]', e.message),
       );
 
+    // iOS raccourci : champs PRÊTS à afficher tels quels dans « Afficher notification ».
+    const objective =
+      objectiveActive && objectiveAmount > 0
+        ? {
+            remaining: Math.max(0, Math.round(objectiveAmount - caToday)),
+            target: Math.round(objectiveAmount),
+            pct: objPct,
+          }
+        : null;
+    const title = `${verdict === 'ACCEPT' ? 'ACCEPTE' : 'REFUSE'} · ${Math.round(eurPerHour)} €/h`;
+    const notifBody = objective
+      ? `${reason}\n${gaugeBar(objective.pct)} ${objective.remaining > 0 ? `reste ${objective.remaining} €` : 'objectif atteint'}`
+      : reason;
+
+    // iOS raccourci → texte brut prêt à afficher (1 ligne) ; Android → JSON structuré (inchangé).
+    if (fromShortcut)
+      return res
+        .type('text/plain')
+        .send(`${verdict === 'ACCEPT' ? '🟢' : '🔴'} ${title}\n${notifBody}`);
+
     return res.json({
       verdict,
       reason,
       eurPerHour: Math.round(eurPerHour * 10) / 10,
       score,
       confidenceMs: Date.now() - start,
+      title,
+      body: notifBody,
+      notif: `${title}\n${notifBody}`,
+      objective,
     });
   } catch (err: any) {
     console.error('[CoachInstant] Error:', err?.message);
+    if (fromShortcut) return res.type('text/plain').send('Décide toi-même.');
     return res.json({
       verdict: 'ACCEPT',
       reason: 'Décide toi-même.',
       eurPerHour: 0,
       score: 50,
       confidenceMs: Date.now() - start,
+      notif: 'Décide toi-même.',
     });
   }
 });
@@ -640,6 +799,69 @@ router.get('/weekly-summary/:driverId', async (req: Request, res: Response) => {
   });
 });
 
+// ── POST /record-prediction ─────────────────────────────────────
+// Moteur de preuve RÉEL : l'app enregistre une prédiction (reco de zone) → la Pieuvre la
+// vérifiera plus tard contre le réel (positions H3 + courses captées). AUCUNE preuve inventée :
+// une ligne = une prédiction datée, verified_at NULL au départ. Fire-and-forget côté app.
+router.post('/record-prediction', async (req: Request, res: Response) => {
+  try {
+    const b = req.body ?? {};
+    const driverId = b.driverId ?? b.driver_id;
+    if (!driverId) return res.status(400).json({ ok: false, error: 'driverId required' });
+    // Rate-limit dédié (bucket 'pred:' distinct du Coach live) : la preuve est notre monnaie,
+    // on borne l'empoisonnement/spam sans jamais étrangler les verdicts. audit Fable #3.
+    if (!checkRateLimit('pred:' + String(driverId)))
+      return res.status(429).json({ ok: false, error: 'rate_limited' });
+    const kind = b.kind === 'verdict' ? 'verdict' : 'zone';
+    // pickup_h3 res 9 : pour une reco de ZONE, lat/lng = CENTRE de la zone → pickup_h3 = H3 de
+    // la zone → permet à la Pieuvre de vérifier « le chauffeur s'y est-il rendu ? ». (audit Fable #2)
+    let pickup_h3: string | null = null;
+    const lat = b.lat != null ? Number(b.lat) : null;
+    const lng = b.lng != null ? Number(b.lng) : null;
+    if (
+      lat != null &&
+      lng != null &&
+      Number.isFinite(lat) &&
+      Number.isFinite(lng) &&
+      !(lat === 0 && lng === 0)
+    ) {
+      try {
+        pickup_h3 = h3.latLngToCell(lat, lng, 9);
+      } catch {
+        pickup_h3 = null;
+      }
+    }
+    const supabase = getSupabase();
+    supabase
+      .from('zone_predictions')
+      .insert({
+        driver_id: driverId,
+        kind,
+        zone_id: b.zoneId ?? b.zone_id ?? null,
+        zone_name: b.zoneName ?? b.zone_name ?? null,
+        pickup_h3,
+        predicted_score: b.predictedScore ?? b.predicted_score ?? null,
+        predicted_multiplier: b.predictedMultiplier ?? b.predicted_multiplier ?? null,
+        expected_eur_hour: b.expectedEurHour ?? b.expected_eur_hour ?? null,
+        lat,
+        lng,
+        platform: b.platform ? String(b.platform).toLowerCase() : null,
+        fare_proposed: b.fareProposed ?? b.fare_proposed ?? null,
+        verdict: b.verdict ?? null,
+      })
+      .then(
+        ({ error }: any) => {
+          if (error) console.error('[record-prediction] insert:', error.message);
+        },
+        (e: any) => console.error('[record-prediction] net:', e?.message),
+      );
+    return res.json({ ok: true });
+  } catch (e: any) {
+    console.error('[record-prediction] error:', e?.message);
+    return res.status(500).json({ ok: false, error: e?.message });
+  }
+});
+
 // ── GET /health ─────────────────────────────────────────────────
 router.get('/health', (_req: Request, res: Response) => {
   res.json({
@@ -736,8 +958,139 @@ router.get('/decision-context', async (req: Request, res: Response) => {
       timeout(800),
     ]);
 
+    // FRIGO ② — zones PRÉDITES (gated sur la vigie Chronos : rien tant que is_ready=false)
+    const predictedZonesPromise = (async (): Promise<any[]> => {
+      try {
+        const { data: st } = await supabase
+          .from('chronos_vigie_state')
+          .select('is_ready')
+          .eq('scope', 'city:' + citySlug)
+          .eq('target', 'demand_count')
+          .maybeSingle();
+        if (!(st as any)?.is_ready) return [];
+        const { data: fc } = await supabase
+          .from('chronos_demand_forecast')
+          .select('pickup_h3,ts_hour,predicted')
+          .eq('scope', 'city:' + citySlug)
+          .eq('target', 'demand_count')
+          .gt('predicted', 0)
+          .order('predicted', { ascending: false })
+          .limit(8);
+        const h3: any = await import('h3-js');
+        return (fc ?? []).map((r: any) => {
+          let lat = null,
+            lng = null;
+          try {
+            [lat, lng] = h3.cellToLatLng(r.pickup_h3);
+          } catch {}
+          return {
+            name: 'Zone ' + String(r.pickup_h3).slice(-4),
+            lat,
+            lng,
+            score: Math.round(r.predicted),
+            at: r.ts_hour,
+            etaMin: null,
+          };
+        });
+      } catch {
+        return [];
+      }
+    })();
+
+    // FRIGO ② — calibration FLOTTE (filet cold-start ; sinon référence ville/véhicule)
+    const fleetCalibPromise = (async (): Promise<any> => {
+      try {
+        const { data } = await supabase
+          .from('fleet_calibration')
+          .select('eur_h_ref,accept_threshold,samples,source')
+          .eq('vehicle_category', vehicleCategory)
+          .maybeSingle();
+        if (data)
+          return {
+            eur_h_ref: (data as any).eur_h_ref,
+            accept_threshold: (data as any).accept_threshold,
+            samples: (data as any).samples,
+            source: (data as any).source,
+          };
+      } catch {}
+      return {
+        eur_h_ref: eurHourRef,
+        accept_threshold: acceptThreshold,
+        samples: 0,
+        source: 'reference',
+      };
+    })();
+
+    // FRIGO ③ — évènements externes (PredictHQ) via proxy interne (geo-cache 5 km, TTL)
+    const eventsPromise = (async (): Promise<any[]> => {
+      try {
+        const r = await fetch(
+          `http://127.0.0.1:${process.env.PORT || 8080}/api/context/events?lat=${effLat}&lng=${effLng}`,
+        );
+        if (!r.ok) return [];
+        const j: any = await r.json();
+        // /api/context/events renvoie { results: [...] } → lire `results` d'abord. audit Fable I5.
+        return (j?.results ?? j?.events ?? j?.data ?? []).slice(0, 5);
+      } catch {
+        return [];
+      }
+    })();
+
+    // FRIGO ④ — PREUVE : accuracy des zones vérifiées contre le RÉEL (moteur de preuve).
+    // Honnête : accuracy_pct = null tant que rien n'est vérifié ; l'app dira « en apprentissage » si <5.
+    const proofPromise = (async (): Promise<any | null> => {
+      try {
+        const { data } = await supabase.rpc('get_driver_proof', {
+          p_driver_id: driverId,
+          p_days: 7,
+        });
+        return data ?? null;
+      } catch {
+        return null;
+      }
+    })();
+
+    // FRIGO ④b — CARNET : prédictions individuelles récentes (verrouillées et/ou déjà
+    // résolues), affichées telles quelles au chauffeur — indépendant de l'agrégat proof
+    // ci-dessus (même source de données, mais jamais fusionnées pour ne pas risquer de
+    // casser le contrat déjà lu par ZoneRecoSheet/Reports).
+    const ledgerPromise = (async (): Promise<any[]> => {
+      try {
+        const { data } = await supabase.rpc('get_prediction_ledger', {
+          p_driver_id: driverId,
+          p_limit: 8,
+        });
+        return Array.isArray(data) ? data : [];
+      } catch {
+        return [];
+      }
+    })();
+
+    // FRIGO ④c — FIABILITÉ PAR ZONE : {zone_id: {bonus, sample_size, accuracy_pct}} pour les
+    // zones ayant ≥5 prédictions vérifiées. Vide tant que le volume n'existe pas — s'auto-active
+    // zone par zone sans jamais nécessiter un nouveau déploiement (Chandler : "je risque d'oublier").
+    const reliabilityPromise = (async (): Promise<Record<string, any>> => {
+      try {
+        const { data } = await supabase.rpc('get_zone_reliability_map');
+        return data && typeof data === 'object' ? data : {};
+      } catch {
+        return {};
+      }
+    })();
+
     // Collecter toutes les données externes — budget 1500ms max pour l'ensemble
-    const [hotZones, weather, schoolCalendar, strikeAlert] = await Promise.all([
+    const [
+      hotZones,
+      weather,
+      schoolCalendar,
+      strikeAlert,
+      predictedZones,
+      fleetCalibration,
+      events,
+      proof,
+      predictionLedger,
+      zoneReliability,
+    ] = await Promise.all([
       Promise.race([hotZonesPromise, new Promise<HotZone[]>((r) => setTimeout(() => r([]), 1500))]),
       Promise.race([
         weatherPromise,
@@ -750,6 +1103,18 @@ router.get('/decision-context', async (req: Request, res: Response) => {
       Promise.race([
         strikePromise,
         new Promise<StrikeAlert | null>((r) => setTimeout(() => r(null), 1500)),
+      ]),
+      Promise.race([
+        predictedZonesPromise,
+        new Promise<any[]>((r) => setTimeout(() => r([]), 1500)),
+      ]),
+      Promise.race([fleetCalibPromise, new Promise<any>((r) => setTimeout(() => r(null), 1500))]),
+      Promise.race([eventsPromise, new Promise<any[]>((r) => setTimeout(() => r([]), 1500))]),
+      Promise.race([proofPromise, new Promise<any>((r) => setTimeout(() => r(null), 1500))]),
+      Promise.race([ledgerPromise, new Promise<any[]>((r) => setTimeout(() => r([]), 1500))]),
+      Promise.race([
+        reliabilityPromise,
+        new Promise<Record<string, any>>((r) => setTimeout(() => r({}), 1500)),
       ]),
     ]);
 
@@ -776,6 +1141,26 @@ router.get('/decision-context', async (req: Request, res: Response) => {
       weather,
       school_calendar: schoolCalendar,
       strike_alert: strikeAlert,
+      // FRIGO ②③ — apprentissage collectif + prédiction + contexte externe unifié
+      predicted_zones: predictedZones ?? [],
+      predicted_zones_source: (predictedZones ?? []).length > 0 ? 'chronos' : 'none',
+      fleet_calibration: fleetCalibration ?? {
+        eur_h_ref: eurHourRef,
+        accept_threshold: acceptThreshold,
+        samples: 0,
+        source: 'reference',
+      },
+      external_context: {
+        weather,
+        events: events ?? [],
+        transport: strikeAlert,
+      },
+      // FRIGO ④ — PREUVE mesurée (moteur réel). null/accuracy null = « en apprentissage » côté app.
+      proof: proof ?? null,
+      // FRIGO ④b — CARNET : prédictions individuelles (verrouillées et/ou résolues), récentes d'abord.
+      prediction_ledger: predictionLedger ?? [],
+      // FRIGO ④c — FIABILITÉ PAR ZONE : {zone_id: {bonus, sample_size, accuracy_pct}}.
+      zone_reliability: zoneReliability ?? {},
       cached_at: new Date().toISOString(),
       ttl_seconds: 300,
       from_cache: false,

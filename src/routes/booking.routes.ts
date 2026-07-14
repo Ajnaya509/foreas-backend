@@ -335,6 +335,38 @@ router.post('/', async (req: Request, res: Response) => {
       `[Booking] Created ${booking.id} for ${site_slug} — ${formatPrice(estimated_price)}`,
     );
 
+    // 2bis. Message in-app CHAUFFEUR (fluidité tunnel client direct, 2026-07-02).
+    // Table pieuvre_in_app_messages = inbox temps réel de l'app (PieuvreInboxService).
+    // Fire-and-forget : une inbox KO ne doit jamais bloquer une réservation.
+    supa
+      .from('pieuvre_in_app_messages')
+      .insert({
+        driver_id: site.driver_id,
+        message_type: 'booking_new',
+        source: 'driver_site',
+        content:
+          `🚗 Nouvelle réservation — ${client_name || 'Un client'} · ` +
+          `${formatDateTime(scheduledDate.toISOString())} · ${formatPrice(estimated_price)}\n` +
+          `Départ : ${pickup_address}\n` +
+          `Confirme vite — un client qui attend est un client qui rappelle Uber.`,
+        metadata: {
+          booking_id: booking.id,
+          client_name: client_name || null,
+          client_phone,
+          scheduled_at: scheduledDate.toISOString(),
+          estimated_price,
+          site_slug,
+          // 11/07 — audit notifs : PieuvreInboxService (client) lit metadata.route
+          // pour router le tap ; ce champ manquait, la notif "nouvelle réservation"
+          // n'allait nulle part malgré son urgence (client qui attend). Onglet
+          // Clients → DashboardConciergeScreen affiche les réservations récentes.
+          route: 'Clients',
+        },
+      })
+      .then(({ error: inboxErr }: { error: any }) => {
+        if (inboxErr) console.error('[Booking] Inbox chauffeur KO:', inboxErr.message);
+      });
+
     // 3. Planifier les rappels SMS
     const reminders = [
       {
@@ -513,10 +545,33 @@ router.post('/:id/confirm', async (req: Request, res: Response) => {
 
     console.log(`[Booking] Confirmed ${id}`);
 
-    // SMS de confirmation au client
+    // Pont WhatsApp client ↔ chauffeur (fluidité, 2026-07-02) : à la confirmation,
+    // le client reçoit le lien wa.me du chauffeur → conversation directe en 1 tap.
+    // Le téléphone n'est partagé qu'APRÈS confirmation (jamais à la demande brute).
+    let waLink = '';
+    let driverFirstName = 'Votre chauffeur';
+    try {
+      const [{ data: drv }, { data: siteRow }] = await Promise.all([
+        supa.from('drivers').select('phone').eq('id', booking.driver_id).single(),
+        supa.from('driver_sites').select('display_name').eq('slug', booking.site_slug).single(),
+      ]);
+      if (siteRow?.display_name) driverFirstName = siteRow.display_name.split(' ')[0];
+      const rawPhone = String(drv?.phone || '').replace(/\D/g, '');
+      if (rawPhone.length >= 9) {
+        const intl = rawPhone.startsWith('0') ? `33${rawPhone.slice(1)}` : rawPhone;
+        const waText = encodeURIComponent(
+          `Bonjour ${driverFirstName}, c'est ${booking.client_name || 'votre client'} — réservation FOREAS confirmée pour le ${formatDateTime(booking.scheduled_at)}.`,
+        );
+        waLink = ` Contactez-le sur WhatsApp : https://wa.me/${intl}?text=${waText}`;
+      }
+    } catch (e: any) {
+      console.warn('[Booking] WhatsApp link skipped:', e.message);
+    }
+
+    // SMS de confirmation au client (+ lien WhatsApp si téléphone chauffeur connu)
     sendSMS(
       booking.client_phone,
-      `FOREAS : Votre reservation du ${formatDateTime(booking.scheduled_at)} est confirmee ! Votre chauffeur vous attend. Depart: ${booking.pickup_address}`,
+      `FOREAS : Reservation du ${formatDateTime(booking.scheduled_at)} confirmee par ${driverFirstName} ! Depart: ${booking.pickup_address}.${waLink}`,
     ).catch(() => {});
 
     return res.json({ success: true, booking });
@@ -688,9 +743,16 @@ router.post('/process-reminders', async (req: Request, res: Response) => {
                     body: JSON.stringify(
                       pushTokens.map((token: string) => ({
                         to: token,
-                        title: '\u23F0 Reservation dans 1h',
+                        title: 'Reservation dans 1h',
                         body: `${booking.pickup_address} \u2192 ${booking.dropoff_address} a ${time}`,
-                        data: { type: 'booking_reminder', bookingId: booking.id },
+                        // 11/07 \u2014 audit notifs : type 'booking_reminder' non reconnu par
+                        // RootNavigator.routeFromNotification. `screen` ajout\u00E9 pour le
+                        // fallback g\u00E9n\u00E9rique (data.screen \u2192 navigation.navigate).
+                        data: {
+                          type: 'booking_reminder',
+                          bookingId: booking.id,
+                          screen: 'Clients',
+                        },
                         sound: 'default',
                         priority: 'high',
                       })),

@@ -29,10 +29,12 @@
     "dotenv": "^16.3.1",
     "express": "^4.21.2",
     "form-data": "^4.0.0",
+    "googleapis": "^173.0.0",
     "h3-js": "^4.4.0",
     "multer": "^1.4.5-lts.1",
     "node-fetch": "^2.7.0",
     "openai": "^4.104.0",
+    "qrcode": "^1.5.4",
     "resend": "^6.9.3",
     "stripe": "^16.12.0",
     "tsx": "^4.7.0",
@@ -45,6 +47,7 @@
     "node": ">=22 <23"
   },
   "devDependencies": {
+    "@types/qrcode": "^1.5.6",
     "eslint": "^8.57.1",
     "prettier": "^3.8.1"
   }

@@ -25,6 +25,7 @@ import {
   type PieuvreTentacle,
 } from '../lib/pieuvre-client';
 import { getSupabase } from '../lib/supabase';
+import { composeStreamContext, PRICING, SONNET_MODEL } from '../ai/ajnayaStreamBrain';
 
 // ═══════════════════════════════════════════════════════════════
 // 🎙️ AUDIO TAGS — strip helper (défense en profondeur)
@@ -42,7 +43,8 @@ function splitAudioTags(text: string | null | undefined): { clean: string; withT
   if (typeof text !== 'string') return { clean: '', withTags: '' };
   const clean = text
     .replace(AUDIO_TAG_REGEX, '')
-    .replace(/\s{2,}/g, ' ')
+    .replace(/[^\S\n]{2,}/g, ' ') // espaces/tabs répétés → 1 espace, mais préserve les \n (blocs décision-first)
+    .replace(/\n{3,}/g, '\n\n') // jamais plus d'une ligne vide
     .trim();
   return { clean, withTags: text };
 }
@@ -70,6 +72,44 @@ type DriverContext = {
   last_known_lat?: number | null;
   last_known_lon?: number | null;
 };
+
+type NearbyAlert = {
+  alert_type: string;
+  description: string | null;
+  distance_km: number;
+  minutes_ago: number;
+};
+
+// 📡 Alertes communauté (signalements Telegram + app) fraîches autour du chauffeur.
+// Sans ça, Ajnaya n'a AUCUN accès aux vrais signalements et invente une réponse
+// si le chauffeur demande "y'a des infos par ici ?". Timeout strict, jamais bloquant.
+async function fetchNearbyAlerts(
+  lat: number | null | undefined,
+  lng: number | null | undefined,
+): Promise<NearbyAlert[]> {
+  if (typeof lat !== 'number' || typeof lng !== 'number') return [];
+  const TIMEOUT_MS = 1500;
+  const timeoutPromise = new Promise<NearbyAlert[]>((resolve) =>
+    setTimeout(() => resolve([]), TIMEOUT_MS),
+  );
+  const fetchPromise = (async (): Promise<NearbyAlert[]> => {
+    try {
+      const supa = getSupabase();
+      const { data, error } = await supa.rpc('get_nearby_community_alerts', {
+        p_lat: lat,
+        p_lng: lng,
+        p_radius_km: 2.5,
+        p_max: 5,
+      });
+      if (error || !data) return [];
+      return data as NearbyAlert[];
+    } catch (err: any) {
+      console.warn('[ajnaya] fetchNearbyAlerts erreur:', err?.message);
+      return [];
+    }
+  })();
+  return Promise.race([fetchPromise, timeoutPromise]);
+}
 
 async function fetchDriverContext(identityId: string | null): Promise<DriverContext | null> {
   if (!identityId) return null;
@@ -172,7 +212,8 @@ router.get('/pieuvre-health', (_req, res) => {
 // le vocabulaire chauffeur VTC France. Réduit drastiquement les hallucinations
 // type "Aulnay-sous-Bois → Nesuboa" ou "T2C → Tessé".
 // Ordre : zones IDF prioritaires → autres villes → aéroports/terminaux →
-// gares → plateformes → jargon métier → formules courantes.
+// gares → plateformes → jargon métier. (VOCABULAIRE uniquement — jamais de
+// phrases-types : elles font halluciner de faux messages sur du silence.)
 const VTC_FR_TRANSCRIBE_PROMPT = `Conversation chauffeur VTC en France avec Ajnaya.
 
 Lieux Île-de-France : Paris, La Défense, Bercy, Opéra, République, Bastille, Châtelet, Pigalle, Belleville, Marais, Trocadéro, Saint-Germain, Champs-Élysées, Place d'Italie, Beaugrenelle, Porte Maillot, Porte de la Chapelle, Porte d'Italie, Boulogne-Billancourt, Neuilly-sur-Seine, Levallois-Perret, Issy-les-Moulineaux, Vincennes, Montreuil, Saint-Denis, Aubervilliers, Aulnay-sous-Bois, Bobigny, Drancy, Le Bourget, Le Blanc-Mesnil, Sevran, Tremblay-en-France, Roissy-en-France, Massy, Orly, Rungis, Créteil, Vitry-sur-Seine, Ivry, Nanterre, Versailles, Saint-Cloud, Suresnes, Meudon, Clichy.
@@ -185,16 +226,20 @@ Autres villes : Lyon Part-Dieu, Bellecour, Aéroport Saint-Exupéry, Marseille S
 
 Plateformes VTC : Uber, Bolt, Heetch, FreeNow, LeCab, Marcel, Allocab, G7, Yango.
 
-Jargon métier : course, vacation, surge, acceptance, pool, file, pic, no-show, créneau, tarif horaire, net, brut, course aéroport, retour à vide, kilométrage, base fare, tip, pourboire, rating, étoile, Diamond, Gold, Platinum, Silver, Quest, boost, multiplier, requalification, dépose-minute, hub.
-
-Formules courantes : "Salut Ajnaya", "j'ai fait", "j'en ai marre", "où je peux gagner", "tarif horaire", "ça vaut le coup", "je tourne sur", "tu peux me dire", "demain matin", "ce soir", "vendredi soir", "weekend", "pic du matin", "pic du soir".`;
+Jargon métier : course, vacation, surge, acceptance, pool, file, pic, no-show, créneau, tarif horaire, net, brut, course aéroport, retour à vide, kilométrage, base fare, tip, pourboire, rating, étoile, Diamond, Gold, Platinum, Silver, Quest, boost, multiplier, requalification, dépose-minute, hub.`;
+// ⚠️ NE JAMAIS remettre de "Formules courantes" (phrases conversationnelles complètes)
+// dans ce prompt (retiré le 11/07/2026, audit Fable). gpt-4o-transcribe s'en sert de
+// GABARIT et, sur du silence/bruit, HALLUCINE un faux message assemblé à partir d'elles
+// (ex. « Salut Ajnaya, j'en ai marre... où je peux gagner... ce soir » = boucle micro).
+// Un prompt de transcription ne doit contenir que du VOCABULAIRE (noms propres, jargon),
+// jamais des phrases-types que le modèle peut recracher comme si l'utilisateur les avait dites.
 
 // Configuration depuis les variables d'environnement
 const CONFIG = {
   OPENAI_API_KEY: process.env.OPENAI_API_KEY || '',
   ANTHROPIC_API_KEY: process.env.ANTHROPIC_API_KEY || '',
   ELEVENLABS_API_KEY: process.env.ELEVENLABS_API_KEY || '',
-  ELEVENLABS_VOICE_ID: process.env.ELEVENLABS_VOICE_ID || 'MNKK2Wl2wbbsEPQTHZGt', // Koraly — Credible Pro Parisian (voix officielle Ajnaya, validée A/B test v3.6)
+  ELEVENLABS_VOICE_ID: process.env.ELEVENLABS_VOICE_ID || 'MNKK2Wl2wbbsEPQTHZGt', // Koraly — Credible Pro Parisian (corrigé 12/07, ex-"Laloosh" par erreur depuis Sprint 9)
   MISTRAL_API_KEY: process.env.MISTRAL_API_KEY || '',
 };
 
@@ -282,7 +327,7 @@ router.post('/llm', async (req: Request, res: Response) => {
 
     // Choisir le modèle Anthropic
     // ⚠️ Plus de Haiku pour conv : tout fallback en Sonnet 4.6, Opus 4.7 sur opus
-    const claudeModel = model.includes('opus') ? 'claude-opus-4-7' : 'claude-sonnet-4-6';
+    const claudeModel = model.includes('opus') ? 'claude-opus-4-8' : 'claude-sonnet-5';
 
     if (!anthropic) {
       // Fallback OpenAI si Anthropic non configuré
@@ -338,6 +383,259 @@ router.post('/llm', async (req: Request, res: Response) => {
     return res.status(500).json({ error: error.message });
   }
 });
+
+// ============================================================================
+// POST /api/ajnaya/tavus-llm[/chat/completions] — LLM custom pour l'avatar Tavus
+// (couche LLM = notre cerveau Ajnaya). OpenAI-compatible AVEC tool-calls, pour
+// piloter un tour guidé de l'app : navigate(screen) / highlight(bloc) / open(feature).
+// Tavus appelle base_url + "/chat/completions" → on répond aux 2 chemins.
+// ============================================================================
+export const TAVUS_TOUR_TOOLS = [
+  {
+    type: 'function' as const,
+    function: {
+      name: 'navigate',
+      description:
+        "Amène le chauffeur sur un écran de l'app FOREAS pendant le tour guidé. Utilise-le quand tu présentes une partie de l'app.",
+      parameters: {
+        type: 'object',
+        properties: {
+          screen: {
+            type: 'string',
+            description: 'Écran cible',
+            enum: ['home', 'ajnaya', 'communaute', 'clients_directs', 'argent', 'profil'],
+          },
+        },
+        required: ['screen'],
+      },
+    },
+  },
+  {
+    type: 'function' as const,
+    function: {
+      name: 'highlight',
+      description:
+        "Met en surbrillance un bloc précis de l'écran actuel pour attirer l'œil du chauffeur pendant l'explication.",
+      parameters: {
+        type: 'object',
+        properties: {
+          bloc: {
+            type: 'string',
+            description:
+              "Identifiant du bloc à surligner (ex. 'carte_zones_chaudes', 'objectif_du_jour', 'wallet_solde', 'bouton_reserver').",
+          },
+        },
+        required: ['bloc'],
+      },
+    },
+  },
+  {
+    type: 'function' as const,
+    function: {
+      name: 'open',
+      description:
+        "Ouvre une fonctionnalité de l'app (deeplink foreas://feature/<key>) quand le chauffeur veut l'essayer.",
+      parameters: {
+        type: 'object',
+        properties: {
+          feature: {
+            type: 'string',
+            description: 'anchor_key de la feature',
+            enum: [
+              'coach_reflexe',
+              'objectif_du_jour',
+              'carte_zones_chaudes',
+              'ajnaya_copilote',
+              'clients_directs',
+              'compta',
+              'wallet_paiements',
+              'statistiques',
+              'abonnement_paliers',
+              'reglages',
+              'driver_sites',
+              'parrainage',
+              'push_alerts',
+            ],
+          },
+        },
+        required: ['feature'],
+      },
+    },
+  },
+  {
+    type: 'function' as const,
+    function: {
+      name: 'set_first_name',
+      description:
+        "Enregistre le prénom du chauffeur DÈS qu'il se présente (« moi c'est Karim »). Remplace l'écran formulaire prénom — appelle-le une seule fois.",
+      parameters: {
+        type: 'object',
+        properties: {
+          first_name: {
+            type: 'string',
+            description: 'Prénom seul, tel que donné par le chauffeur.',
+          },
+        },
+        required: ['first_name'],
+      },
+    },
+  },
+  {
+    type: 'function' as const,
+    function: {
+      name: 'set_objective',
+      description:
+        "Enregistre l'objectif principal du chauffeur dès qu'il l'exprime. MORE_MONEY = gagner plus, LESS_WORK = optimiser son temps, BOTH = les deux. Remplace l'écran formulaire objectif.",
+      parameters: {
+        type: 'object',
+        properties: {
+          objective: { type: 'string', enum: ['MORE_MONEY', 'LESS_WORK', 'BOTH'] },
+        },
+        required: ['objective'],
+      },
+    },
+  },
+];
+
+const TAVUS_TOUR_SYSTEM = `${AJNAYA_BASE_SYSTEM_PROMPT}
+
+RÔLE SPÉCIAL — GUIDE VOCAL D'ONBOARDING (avatar Tavus) :
+Tu fais découvrir l'app FOREAS à un nouveau chauffeur, en parlant, comme une vraie personne.
+- Phrases COURTES (tu es lu à voix haute par ElevenLabs). Une idée à la fois.
+- Tu PILOTES l'app avec tes outils : appelle navigate(screen) pour changer d'écran, highlight(bloc) pour montrer un élément, open(feature) quand il veut essayer.
+- Enchaîne : présente un écran → navigate → 1 phrase → highlight le point clé → question courte.
+- Ne récite pas une liste. Fais un vrai tour vivant, adapté à ses réponses.
+- Toujours "tu", ton pro et proche. Devise : gagne plus, roule moins.
+- ⚠️ Dès que tu montres/ouvres quelque chose : dis 1 phrase COURTE **ET** appelle l'outil DANS LA MÊME réponse (le texte d'abord, puis l'appel d'outil). Ne diffère JAMAIS l'appel au tour suivant — sinon l'écran ne bouge pas. Si le chauffeur demande une action ("emmène-moi sur…", "montre-moi…", "ouvre…"), tu DOIS appeler l'outil correspondant ce tour-ci.
+- EXCEPTION : sur un simple bonjour SANS demande d'action ("Salut", "ça va ?"), réponds juste par une phrase d'accueil chaleureuse (propose de démarrer le tour), SANS bouger l'écran (pas de navigate/highlight/open).
+- CAPTURE (remplace les formulaires) : dès que le chauffeur donne son PRÉNOM ("moi c'est Karim"), appelle set_first_name — en même temps que ta phrase d'accueil, c'est invisible pour lui. Dès qu'il exprime son OBJECTIF (gagner plus / moins rouler / les deux), appelle set_objective (MORE_MONEY/LESS_WORK/BOTH). Une seule fois chacun. Si tu ne connais pas encore son prénom, demande-le naturellement au début. Avant la fin du tour, assure-toi d'avoir capté prénom + objectif.
+- FIN DE L'APPEL (~3 min) : quand tu reçois un signal de fin de temps (message technique type "[fin de temps]" / "[wrap]" / "conclus maintenant"), conclus chaleureusement en 1-2 phrases : dis que tu dois filer prendre d'autres appels, que tu as adoré, et qu'on continue tranquille DANS LE CHAT (l'onglet Ajnaya) quand il veut. Ne coupe jamais sèchement. N'appelle AUCUN outil sur ce tour de conclusion.`;
+
+function oaiToolsToAnthropic(tools: any[]): any[] {
+  if (!Array.isArray(tools)) return [];
+  return tools
+    .filter((t) => t?.function?.name)
+    .map((t) => ({
+      name: t.function.name,
+      description: t.function.description || '',
+      input_schema: t.function.parameters || { type: 'object', properties: {} },
+    }));
+}
+
+async function handleTavusLlm(req: Request, res: Response) {
+  const t0 = Date.now();
+  try {
+    if (!anthropic) return res.status(503).json({ error: 'Anthropic non configuré' });
+    const { messages = [], model = 'claude-sonnet-5', tools } = req.body || {};
+    const systemFromReq = messages
+      .filter((m: any) => m.role === 'system')
+      .map((m: any) => m.content)
+      .join('\n\n');
+    const convo = messages.filter((m: any) => m.role !== 'system');
+    // Nos tools de tour ont priorité ; on accepte aussi ceux passés par Tavus.
+    const anthTools = oaiToolsToAnthropic(
+      Array.isArray(tools) && tools.length ? tools : TAVUS_TOUR_TOOLS,
+    );
+    const claudeModel = String(model).includes('opus') ? 'claude-opus-4-8' : 'claude-sonnet-5';
+    const resp = await anthropic.messages.create({
+      model: claudeModel,
+      max_tokens: 320,
+      system: `${TAVUS_TOUR_SYSTEM}${systemFromReq ? '\n\n' + systemFromReq : ''}`,
+      tools: anthTools,
+      messages: convo.map((m: any) => ({ role: m.role, content: String(m.content ?? '') })),
+    });
+    // Map Anthropic → OpenAI
+    const textBlock = resp.content.find((b: any) => b.type === 'text') as any;
+    const toolBlocks = resp.content.filter((b: any) => b.type === 'tool_use') as any[];
+    const message: any = {
+      role: 'assistant',
+      content: textBlock ? splitAudioTags(textBlock.text).clean : '',
+    };
+    // Validation stricte : on JETTE tout tool_call malformé (arg requis absent / hors enum)
+    // pour ne JAMAIS envoyer un ordre vide (ex. navigate({})) à l'app.
+    const SCREENS = ['home', 'ajnaya', 'communaute', 'clients_directs', 'argent', 'profil'];
+    const FEATURES = [
+      'coach_reflexe',
+      'objectif_du_jour',
+      'carte_zones_chaudes',
+      'ajnaya_copilote',
+      'clients_directs',
+      'compta',
+      'wallet_paiements',
+      'statistiques',
+      'abonnement_paliers',
+      'reglages',
+      'driver_sites',
+      'parrainage',
+      'push_alerts',
+    ];
+    const validTools = toolBlocks.filter((b: any) => {
+      const a = b.input || {};
+      if (b.name === 'navigate') return SCREENS.includes(a.screen);
+      if (b.name === 'open') return FEATURES.includes(a.feature);
+      if (b.name === 'highlight') return typeof a.bloc === 'string' && a.bloc.trim().length > 0;
+      if (b.name === 'set_first_name')
+        return (
+          typeof a.first_name === 'string' &&
+          a.first_name.trim().length > 0 &&
+          a.first_name.trim().length <= 40
+        );
+      if (b.name === 'set_objective')
+        return ['MORE_MONEY', 'LESS_WORK', 'BOTH'].includes(a.objective);
+      return false;
+    });
+    if (validTools.length) {
+      message.tool_calls = validTools.map((b: any) => ({
+        id: b.id,
+        type: 'function',
+        function: { name: b.name, arguments: JSON.stringify(b.input || {}) },
+      }));
+    }
+    // Filet anti-silence : l'avatar ne doit JAMAIS rester muet ni bouger l'écran sans parler.
+    if (!message.content) {
+      if (message.tool_calls) {
+        const kind = validTools[0].name;
+        const fills: Record<string, string[]> = {
+          navigate: ['Allez, suis-moi 👇', 'On y va, regarde.', 'Viens voir.'],
+          open: ['Tiens, je te l’ouvre.', 'C’est parti, regarde ça.', 'Voilà, je l’ouvre.'],
+          highlight: ['Regarde juste là.', 'C’est ça, ici.', 'Vise ce bloc.'],
+          set_first_name: ['C’est noté 👌', 'Enchanté !', 'Bien noté.'],
+          set_objective: ['C’est noté, on part là-dessus.', 'Parfait, je cale tout sur ça.'],
+        };
+        const arr = fills[kind] || ['Regarde 👇'];
+        message.content = arr[Math.floor(Math.random() * arr.length)];
+      } else {
+        // Ni parole ni action valide → phrase de relance (jamais d'avatar planté).
+        const relances = [
+          'Je t’écoute — dis-moi ce que tu veux voir en premier.',
+          'On continue le tour ? Dis-moi ce qui t’intéresse.',
+          'Par quoi on commence : gagner plus, ou tes clients directs ?',
+        ];
+        message.content = relances[Math.floor(Math.random() * relances.length)];
+      }
+    }
+    console.log(
+      `🎭 [TAVUS-LLM] ${Date.now() - t0}ms tools=${toolBlocks.length} txt="${(message.content || '').slice(0, 50)}"`,
+    );
+    return res.json({
+      id: `chatcmpl-${Date.now()}`,
+      object: 'chat.completion',
+      created: Math.floor(Date.now() / 1000),
+      model: claudeModel,
+      choices: [{ index: 0, message, finish_reason: toolBlocks.length ? 'tool_calls' : 'stop' }],
+      usage: {
+        prompt_tokens: resp.usage.input_tokens,
+        completion_tokens: resp.usage.output_tokens,
+        total_tokens: resp.usage.input_tokens + resp.usage.output_tokens,
+      },
+    });
+  } catch (e: any) {
+    console.error('❌ [TAVUS-LLM]', e?.message);
+    return res.status(500).json({ error: e?.message || 'tavus-llm error' });
+  }
+}
+router.post('/tavus-llm', handleTavusLlm);
+router.post('/tavus-llm/chat/completions', handleTavusLlm);
 
 // Client OpenAI
 let openai: OpenAI | null = null;
@@ -440,6 +738,448 @@ router.post('/transcribe', async (req: Request, res: Response) => {
 });
 
 // ============================================
+// 🧠 ROUTE 1bis: CHAT STREAM (SSE) — réponse quasi-instantanée
+// ============================================
+// Contrat = FOREAS-SHARED/AJNAYA_CONTRACTS.md §7 + BRIEF_STREAMING_AJNAYA_2026-07-09.md.
+// Body IDENTIQUE à /chat. Appelle Claude directement (n8n ne peut pas streamer) en
+// répliquant le prompt du node n8n `Compose LLM Input` via ajnayaStreamBrain.ts —
+// même cerveau, transmission différente. /chat reste inchangé (filet de repli).
+router.post('/chat/stream', async (req: Request, res: Response) => {
+  const startTime = Date.now();
+
+  // Auth — nouveau contrat, déjà implémenté côté client (src/services/AjnayaStream.ts).
+  const expectedKey = process.env.FOREAS_SERVICE_KEY;
+  if (expectedKey) {
+    const provided = (req.headers['x-foreas-service-key'] as string) || '';
+    if (provided !== expectedKey) {
+      return res.status(401).json({ error: 'unauthorized' });
+    }
+  }
+
+  const message = req.body.message || req.body.question || req.body.text;
+  const context = req.body.context || {};
+  const history = req.body.history || [];
+
+  if (!message || typeof message !== 'string' || message.trim().length === 0) {
+    return res.json({
+      success: true,
+      content: "Bonjour ! Je suis Ajnaya, ton assistante FOREAS. Comment puis-je t'aider ?",
+      response: "Bonjour ! Je suis Ajnaya, ton assistante FOREAS. Comment puis-je t'aider ?",
+      mode: 'default',
+      response_time_ms: Date.now() - startTime,
+    });
+  }
+
+  if (!anthropic) {
+    return res.status(503).json({ error: 'anthropic_not_configured' });
+  }
+
+  const channel: string = context?.channel || 'app';
+  const tentacle: PieuvreTentacle =
+    channel === 'widget_site' ? 'widget_site' : channel === 'whatsapp' ? 'whatsapp' : 'app_driver';
+  const sessionId =
+    context?.session_id ||
+    context?.sessionId ||
+    `app-${Date.now()}-${Math.random().toString(36).substring(2, 8)}`;
+  const identityIdRaw: string | null = context?.identity_id || context?.identityId || null;
+
+  // ⚠️ Lancée MAINTENANT (non-awaited) pour tourner en vrai parallèle avec le reste de
+  // l'enrichissement dans composeStreamContext (audit Fable 5 : awaiter ici avant les headers
+  // SSE ajoutait jusqu'à 2s de latence invisible, hors enrichment_ms, sur les vrais appels app
+  // avec identity_id).
+  const driverCtxPromise = fetchDriverContext(identityIdRaw);
+  const liveContextFromApp = context?.live_context || context?.liveContext || {};
+
+  let finished = false;
+  let clientAborted = false;
+  let ttftMs: number | null = null;
+  let keepaliveTimer: ReturnType<typeof setInterval> | null = null;
+  let anthropicStream: ReturnType<NonNullable<typeof anthropic>['messages']['stream']> | null =
+    null;
+
+  const writeEvent = (event: string, data: unknown) => {
+    if (finished) return;
+    try {
+      res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
+    } catch {
+      /* socket fermé entre-temps — rien à faire */
+    }
+  };
+
+  const endTerminal = () => {
+    finished = true;
+    if (keepaliveTimer) clearInterval(keepaliveTimer);
+    try {
+      res.end();
+    } catch {
+      /* déjà fermé */
+    }
+  };
+
+  // ⚠️ FIX Fable 5 (bug confirmé) : `req.on('close')` fire à la fin de LECTURE du body de la
+  // requête (quasi immédiat sur Node ≥16), PAS à la déconnexion — donc s'il est enregistré après
+  // un `await`, l'event est déjà passé et le handler ne fire JAMAIS (génération jamais coupée,
+  // jusqu'à 280 tokens gaspillés par abandon). `res.on('close')` fire au VRAI abandon
+  // (`writableEnded=false`) ET à la fin normale (couvert par le guard `finished`) — et il est
+  // enregistré ICI, avant tout `await`, pour ne rater aucune fenêtre de déconnexion.
+  res.on('close', () => {
+    if (!finished) {
+      clientAborted = true;
+      try {
+        anthropicStream?.abort();
+      } catch {
+        /* déjà terminé */
+      }
+      endTerminal();
+    }
+  });
+
+  try {
+    // ── SSE headers + padding anti-buffer proxy (Railway) — avant tout travail async ──
+    res.status(200);
+    res.setHeader('Content-Type', 'text/event-stream; charset=utf-8');
+    res.setHeader('Cache-Control', 'no-cache, no-transform');
+    res.setHeader('Connection', 'keep-alive');
+    res.setHeader('X-Accel-Buffering', 'no');
+    res.setHeader('Content-Encoding', 'identity');
+    (res as any).flushHeaders?.();
+    try {
+      req.socket?.setNoDelay?.(true); // désactive Nagle — chaque delta part immédiatement
+    } catch {
+      /* best-effort */
+    }
+    res.write(':' + ' '.repeat(2048) + '\n\n');
+
+    keepaliveTimer = setInterval(() => {
+      if (!finished) {
+        try {
+          res.write(': ping\n\n');
+        } catch {
+          /* socket fermé */
+        }
+      }
+    }, 10000);
+
+    const brain = await composeStreamContext(getSupabase(), openai, {
+      tentacle,
+      canal: channel,
+      session_id: sessionId,
+      identity_id: identityIdRaw,
+      user_text: message.trim(),
+      history: (history || []).slice(-10),
+      page_source: context?.page_source || `app://${channel}`,
+      scroll_section: context?.scroll_section || null,
+      heat_score: typeof context?.heat_score === 'number' ? context.heat_score : 0,
+      live_context_partial: {
+        gps: liveContextFromApp.gps || null,
+        time: liveContextFromApp.time || null,
+        // 13/07 — brief AJNAYA_EXPERIENCE_PHONE_PROMPT_LIVE_CONTEXT.md (fil Site) :
+        // now = heure fraîche calculée à chaque tour ; visitor = reconnaissance 1er tour.
+        now: liveContextFromApp.now || null,
+        visitor: liveContextFromApp.visitor || null,
+        objective: context?.driverObjective || context?.driver_objective || null,
+        driver_first_name_fallback: context?.driverFirstName || null,
+      },
+      driver_context_promise: driverCtxPromise,
+      client_version: 'app-v1.10.46',
+    });
+
+    if (clientAborted) return;
+
+    writeEvent('meta', {
+      session_id: sessionId,
+      llm_model: brain.model,
+      identity_id: brain.identity_id,
+    });
+
+    // Persistance INBOUND — fire-and-forget, ne retarde jamais le flux.
+    getSupabase()
+      .from('pieuvre_conversations')
+      .insert({
+        tentacle,
+        channel: [
+          'whatsapp',
+          'whatsapp_voice',
+          'phone',
+          'telegram',
+          'email',
+          'in_app',
+          'sms',
+        ].includes(channel)
+          ? channel
+          : 'in_app',
+        direction: 'inbound',
+        message_type: 'text',
+        content: message.trim(),
+        identity_id: brain.identity_id,
+        sentiment: 'neutral',
+        objection_detected: brain.detected_objection,
+        metadata: {
+          identity_id: brain.identity_id,
+          session_id: sessionId,
+          page_source: context?.page_source,
+          heat_score: context?.heat_score,
+          client_version: 'app-v1.10.46',
+        },
+      })
+      .then(
+        () => {},
+        (e: any) => console.warn('[ajnaya-stream] insert inbound failed:', e?.message),
+      );
+
+    // Les tags audio Koraly v3 ([confident], [matter of fact]...) ne doivent JAMAIS apparaître
+    // dans les `delta` — ils sont visibles en direct dans la bulle chat côté client. On les
+    // strip AU FIL DE L'EAU en retenant tout '[' en attente tant qu'on ne sait pas s'il se
+    // referme en tag reconnu (sinon on ré-émettrait puis "désémettrait" du texte — impossible en
+    // SSE). Garantit par construction done.full_text === Σ(delta.text envoyés).
+    let rawAccum = '';
+    let cleanSentLen = 0;
+    const flushClean = (isFinal: boolean) => {
+      const lastOpen = rawAccum.lastIndexOf('[');
+      const safeUpTo =
+        !isFinal && lastOpen !== -1 && !rawAccum.slice(lastOpen).includes(']')
+          ? lastOpen
+          : rawAccum.length;
+      const { clean } = splitAudioTags(rawAccum.slice(0, safeUpTo));
+      if (clean.length <= cleanSentLen) return;
+      const piece = clean.slice(cleanSentLen);
+      cleanSentLen = clean.length;
+      if (!piece) return;
+      if (ttftMs === null) {
+        ttftMs = Date.now() - startTime;
+        console.log(
+          `⚡ [AJNAYA STREAM] TTFT=${ttftMs}ms model=${brain.model} (${brain.model_reason})`,
+        );
+      }
+      writeEvent('delta', { text: piece });
+    };
+
+    // 12/07 — flux TTS phrase par phrase (fix latence texte/voix demandé par Chandler) :
+    // additif, ne touche PAS flushClean/delta ci-dessus. Émet un `tts_chunk` dès qu'une
+    // phrase complète existe dans la zone "sûre" (même garde anti-tag-coupé que flushClean),
+    // AVEC les tags [confident] etc. conservés (contrairement à `clean`) — le client les
+    // utilise pour la prosodie ElevenLabs v3. Contrairement à `delta`, une frontière de
+    // phrase n'est acceptée QUE si un espace l'a déjà confirmée (jamais de pari sur un "."
+    // qui pourrait être un nombre en cours de réception, ex "3.5").
+    const SENTENCE_BOUNDARY_RE = /[.!?…]\s/g;
+    const MIN_TTS_CHUNK_CHARS = 24; // fusionne les phrases courtes ("Oui." "Ok.") — évite le haché
+    let ttsFlushedLen = 0;
+    const flushTts = (isFinal: boolean) => {
+      const lastOpen = rawAccum.lastIndexOf('[');
+      const safeEnd =
+        !isFinal && lastOpen !== -1 && !rawAccum.slice(lastOpen).includes(']')
+          ? lastOpen
+          : rawAccum.length;
+      const zone = rawAccum.slice(ttsFlushedLen, safeEnd);
+      if (!zone) return;
+
+      if (isFinal) {
+        ttsFlushedLen = safeEnd;
+        const chunk = zone.trim();
+        if (chunk) writeEvent('tts_chunk', { text: chunk });
+        return;
+      }
+
+      let lastBoundary = -1;
+      let m: RegExpExecArray | null;
+      SENTENCE_BOUNDARY_RE.lastIndex = 0;
+      while ((m = SENTENCE_BOUNDARY_RE.exec(zone)) !== null) lastBoundary = m.index + 1;
+      if (lastBoundary === -1 || lastBoundary < MIN_TTS_CHUNK_CHARS) return; // attend la suite
+
+      const chunk = zone.slice(0, lastBoundary).trim();
+      ttsFlushedLen += lastBoundary;
+      if (chunk) writeEvent('tts_chunk', { text: chunk });
+    };
+
+    anthropicStream = anthropic.messages.stream({
+      model: brain.model,
+      max_tokens: brain.max_tokens,
+      temperature: brain.temperature,
+      system: [
+        { type: 'text', text: brain.systemStatic, cache_control: { type: 'ephemeral' } },
+        {
+          type: 'text',
+          text: brain.systemDynamic.trim()
+            ? brain.systemDynamic
+            : 'Contexte runtime: aucun signal pour le moment.',
+        },
+      ],
+      messages: brain.messages,
+    });
+
+    anthropicStream.on('text', (delta: string) => {
+      if (clientAborted || finished) return;
+      rawAccum += delta;
+      flushClean(false);
+      flushTts(false);
+    });
+
+    const finalMessage = await anthropicStream.finalMessage();
+
+    if (clientAborted) return;
+
+    flushClean(true); // purge un éventuel '[' resté en attente (jamais refermé → texte littéral)
+    flushTts(true); // idem côté TTS — le reliquat part en UN dernier tts_chunk, tags compris
+
+    if (!rawAccum || rawAccum.trim().length < 2) {
+      writeEvent('error', { message: 'réponse vide du modèle', code: 'empty_completion' });
+      endTerminal();
+      return;
+    }
+
+    const splitResult = splitAudioTags(rawAccum);
+    const cleanText = splitResult.clean;
+    const ttsText = splitResult.withTags;
+    const replyTrim = cleanText.trim();
+    const expectsVoiceResponse =
+      replyTrim.endsWith('?') || replyTrim.endsWith('?»') || replyTrim.endsWith('?"');
+
+    const usage = finalMessage?.usage;
+    const inputTokens = usage?.input_tokens || 0;
+    const outputTokens = usage?.output_tokens || 0;
+    // Audit Fable 5 : coût calculé au tarif SONNET quel que soit le modèle → surestimé ~3x sur
+    // le trafic Haiku (l'essentiel des messages). Tarif réel par modèle.
+    const price = PRICING[brain.model] || PRICING[SONNET_MODEL];
+    const costUsd = inputTokens * price.in + outputTokens * price.out;
+    const latencyMs = Date.now() - startTime;
+
+    writeEvent('tts', { tts_text: ttsText, audio_url: null });
+
+    const nextActions: Array<Record<string, unknown>> = [];
+    if (brain.intent_detected === 'pricing') {
+      nextActions.push({ type: 'cta', label: 'Voir les tarifs', url: '/tarifs2' });
+    } else if (brain.intent_detected === 'how_it_works') {
+      nextActions.push({ type: 'cta', label: 'Découvrir Ajnaya', url: '/chauffeurs' });
+    }
+
+    writeEvent('done', {
+      full_text: cleanText,
+      pieuvre_reply: {
+        text: cleanText,
+        tts_text: ttsText,
+        llm_model: brain.model,
+        audio_url: null,
+      },
+      expects_voice_response: expectsVoiceResponse,
+      intent_detected: brain.intent_detected,
+      next_actions: nextActions,
+    });
+    endTerminal();
+
+    console.log(
+      `✅ [AJNAYA STREAM] (${latencyMs}ms, ttft=${ttftMs}ms) model=${brain.model} intent=${brain.intent_detected}`,
+    );
+
+    // Persistance OUTBOUND + canal_memory + télémétrie — APRÈS le done, jamais bloquant.
+    const supa = getSupabase();
+    supa
+      .from('pieuvre_conversations')
+      .insert({
+        tentacle,
+        channel: [
+          'whatsapp',
+          'whatsapp_voice',
+          'phone',
+          'telegram',
+          'email',
+          'in_app',
+          'sms',
+        ].includes(channel)
+          ? channel
+          : 'in_app',
+        direction: 'outbound',
+        message_type: 'text',
+        content: cleanText,
+        identity_id: brain.identity_id,
+        llm_model: brain.model,
+        llm_tokens: inputTokens + outputTokens,
+        llm_cost_usd: costUsd,
+        sentiment: 'neutral',
+        objection_detected: brain.detected_objection,
+        metadata: {
+          identity_id: brain.identity_id,
+          session_id: sessionId,
+          client_version: 'app-v1.10.46',
+        },
+      })
+      .then(
+        () => {},
+        (e: any) => console.warn('[ajnaya-stream] insert outbound failed:', e?.message),
+      );
+
+    if (brain.identity_id) {
+      const now = new Date().toISOString();
+      supa
+        .from('canal_memory')
+        .upsert(
+          [
+            {
+              identity_id: brain.identity_id,
+              canal: 'app',
+              context_key: 'last_intent',
+              context_value: { intent: brain.intent_detected, ts: now },
+              updated_at: now,
+            },
+            {
+              identity_id: brain.identity_id,
+              canal: 'app',
+              context_key: 'last_ajnaya_msg',
+              context_value: { text: cleanText.slice(0, 500), ts: now },
+              updated_at: now,
+            },
+            {
+              identity_id: brain.identity_id,
+              canal: 'app',
+              context_key: 'last_seen',
+              context_value: { ts: now, page: context?.page_source || null },
+              updated_at: now,
+            },
+          ],
+          { onConflict: 'identity_id,canal,context_key' },
+        )
+        .then(
+          () => {},
+          (e: any) => console.warn('[ajnaya-stream] upsert canal_memory failed:', e?.message),
+        );
+    }
+
+    supa
+      .from('pieuvre_analytics_events')
+      .insert({
+        event_name: 'ajnaya_respond_stream',
+        canal_source: tentacle,
+        identity_id: brain.identity_id,
+        ts: Date.now(),
+        meta: {
+          latency_ms: latencyMs,
+          ttft_ms: ttftMs,
+          llm_model: brain.model,
+          model_reason: brain.model_reason,
+          cost_usd: costUsd,
+          input_tokens: inputTokens,
+          output_tokens: outputTokens,
+          intent: brain.intent_detected,
+          enrichment_ms: brain.debug.enrichment_ms,
+          success: true,
+        },
+      })
+      .then(
+        () => {},
+        (e: any) => console.warn('[ajnaya-stream] perf telemetry failed:', e?.message),
+      );
+  } catch (err: any) {
+    if (clientAborted) {
+      // Abandon volontaire du client (stream.abort() déjà appelé) — rien à émettre.
+      endTerminal();
+      return;
+    }
+    console.error('❌ [AJNAYA STREAM] Erreur:', err?.message);
+    writeEvent('error', { message: 'erreur serveur, réessaie', code: 'internal_error' });
+    endTerminal();
+  }
+});
+
+// ============================================
 // 🧠 ROUTE 2: CHAT (LangGraph Ajnaya + Fallback GPT-4o)
 // ============================================
 
@@ -504,6 +1244,10 @@ router.post('/chat', async (req: Request, res: Response) => {
         const identityIdResolved = context?.identity_id || context?.identityId || null;
         const driverCtx = await fetchDriverContext(identityIdResolved);
         const liveContextFromApp = context?.live_context || context?.liveContext || {};
+        const nearbyAlerts = await fetchNearbyAlerts(
+          liveContextFromApp.gps?.lat,
+          liveContextFromApp.gps?.lng,
+        );
         const liveContextEnriched = {
           driver:
             driverCtx ||
@@ -511,10 +1255,13 @@ router.post('/chat', async (req: Request, res: Response) => {
           gps: liveContextFromApp.gps || null,
           time: liveContextFromApp.time || null,
           objective: context?.driverObjective || context?.driver_objective || null,
+          // 📡 Signalements communauté frais (<3h, <2,5km) — jamais halluciner ce genre
+          // de réponse : si vide, Ajnaya doit dire qu'elle n'a rien de récent, pas inventer.
+          nearby_alerts: nearbyAlerts,
         };
         if (driverCtx) {
           console.log(
-            `🐙 [AJNAYA] live_context: ${driverCtx.first_name || '?'} (J-${driverCtx.days_since_signup}, ${driverCtx.total_rides}c, plan=${driverCtx.plan}) GPS=${liveContextFromApp.gps ? 'on' : 'off'}`,
+            `🐙 [AJNAYA] live_context: ${driverCtx.first_name || '?'} (J-${driverCtx.days_since_signup}, ${driverCtx.total_rides}c, plan=${driverCtx.plan}) GPS=${liveContextFromApp.gps ? 'on' : 'off'} alerts=${nearbyAlerts.length}`,
           );
         }
 
@@ -631,7 +1378,7 @@ router.post('/chat', async (req: Request, res: Response) => {
         );
 
         // 🎙️ Strip audio tags du texte LangGraph (le LLM peut en avoir injecté
-        // car le system prompt v67 inclut AJNAYA_KORALY_V3_AUDIO_TAGS)
+        // car le system prompt v67 inclut AJNAYA_LALOOSH_V3_AUDIO_TAGS)
         const lgSplit = splitAudioTags(result.response);
         const lgClean = lgSplit.clean;
         const lgWithTags = lgSplit.withTags;
